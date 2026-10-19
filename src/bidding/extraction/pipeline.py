@@ -317,14 +317,19 @@ class _ExtractionRunner:
         except ExtractError as exc:
             if exc.fatal:
                 raise
+            # Retry truncated or malformed output on smaller halves.  Large
+            # scoring tables often produce invalid JSON even when the reply
+            # was not cut off, so bisection is not limited to truncation.
             if (
-                exc.truncated
+                (exc.truncated or len(unit.text) >= self.settings.extract_bisect_min_chars)
                 and depth < self.settings.extract_bisect_max_depth
-                and len(unit.text) >= self.settings.extract_bisect_min_chars
             ):
                 halves = _split_for_bisect(unit.text)
                 if halves:
-                    self.notify(f"  输出截断，二分重试（depth={depth + 1}）：{unit.title}")
+                    reason = "输出截断" if exc.truncated else "输出异常"
+                    self.notify(
+                        f"  {reason}，二分重试（depth={depth + 1}）：{unit.title}"
+                    )
                     left_text, right_text = halves
                     left = replace(unit, title=f"{unit.title}（上）", text=left_text)
                     right = replace(unit, title=f"{unit.title}（下）", text=right_text)

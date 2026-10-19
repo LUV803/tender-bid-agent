@@ -81,6 +81,22 @@ def test_duplicate_factors_merge_criteria_scores_and_quotes() -> None:
     ]
 
 
+def test_blank_tender_templates_and_slash_thresholds_are_dropped() -> None:
+    raw = {
+        "qualifications": [
+            {"requirement": "近/年须至少具有/项已完成/施工业绩"},
+            {"requirement": "施工资质", "thresholds": ["/", "三级及以上"]},
+            {"requirement": "投标人应提供近 3 年经审计财务会计报表"},
+        ]
+    }
+    items = normalize_extraction(raw)["qualifications"]
+    assert [item["requirement"] for item in items] == [
+        "施工资质",
+        "投标人应提供近 3 年经审计财务会计报表",
+    ]
+    assert items[0]["thresholds"] == ["三级及以上"]
+
+
 def test_duplicate_qualifications_merge_thresholds() -> None:
     raw = {
         "qualification_items": [

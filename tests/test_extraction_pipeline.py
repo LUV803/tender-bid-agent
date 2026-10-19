@@ -5,8 +5,11 @@ from __future__ import annotations
 from dataclasses import replace
 
 from bidding.config import get_settings
+from bidding.extraction.errors import ExtractError
+from bidding.extraction.llm import JsonCompletion
 from bidding.extraction.pipeline import (
     ExtractionUnit,
+    _ExtractionRunner,
     _split_for_bisect,
     _without_toc_pages,
     build_units,
@@ -116,6 +119,41 @@ def test_without_toc_pages_removes_only_matching_page_blocks() -> None:
     assert "正文一" in result and "正文三" in result
     assert "<!-- page: 1 -->" in result
     assert _without_toc_pages(text, []) == text
+
+
+def test_runner_bisects_large_units_after_malformed_json() -> None:
+    settings = replace(
+        _settings(),
+        extract_bisect_min_chars=1200,
+        extract_bisect_max_depth=2,
+    )
+    unit = ExtractionUnit(
+        index=1,
+        title="附件五：评标表格",
+        path=["第三章 评标办法"],
+        text=_filler("评分标准", 80),
+        focus="scoring",
+    )
+
+    class FlakyClient:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def complete_json(self, prompt: str) -> JsonCompletion:
+            self.calls += 1
+            if self.calls == 1:
+                raise ExtractError("模型输出不是合法 JSON：Expecting ',' delimiter")
+            return JsonCompletion(
+                data={"evaluation_method": "综合评估法"},
+                used_json_mode=True,
+            )
+
+    client = FlakyClient()
+    runner = _ExtractionRunner(settings, client)  # type: ignore[arg-type]
+    result, used_json = runner.extract_text(unit)
+    assert client.calls == 3
+    assert used_json is True
+    assert result["evaluation_method"] == "综合评估法"
 
 
 def test_split_for_bisect_returns_overlapping_halves() -> None:

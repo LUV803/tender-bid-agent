@@ -100,11 +100,19 @@ _METHOD_HINTS = (
     "综合评分法",
     "合理低价法",
 )
+_BLANK_TEMPLATE_RE = re.compile(
+    r"(?:近|于)?\s*[/／]\s*(?:年|月|日|项|个|标段|万元|元)"
+)
 
 
 def _is_placeholder(value: str) -> bool:
     text = (value or "").strip()
     return not text or bool(_PLACEHOLDER_RE.match(text))
+
+
+def _looks_like_blank_template(value: str) -> bool:
+    """Detect tender templates such as ``近/年须至少具有/项业绩``."""
+    return bool(_BLANK_TEMPLATE_RE.search(value or ""))
 
 
 def _method_rank(value: str) -> int:
@@ -352,11 +360,19 @@ def _normalize_qualification(item: Any) -> dict[str, Any] | None:
     if not isinstance(item, dict):
         return None
     requirement = _first(item, "requirement", "name", "title", "条件", "description")
-    if not requirement:
+    if (
+        not requirement
+        or _is_placeholder(requirement)
+        or _looks_like_blank_template(requirement)
+    ):
         return None
-    thresholds = _as_str_list(
-        item.get("thresholds", item.get("threshold", item.get("门槛")))
-    )
+    thresholds = [
+        text
+        for text in _as_str_list(
+            item.get("thresholds", item.get("threshold", item.get("门槛")))
+        )
+        if not _is_placeholder(text) and not _looks_like_blank_template(text)
+    ]
     return {
         "category": _category(item.get("category"), "qualifications", requirement),
         "requirement": requirement,

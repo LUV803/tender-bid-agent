@@ -1,0 +1,80 @@
+{
+  "_instructions": "复制为 upload/bidder_profile.json 后填写。留空的字段一律生成【待填写：...】占位符，系统不会编造公司名称、资质、业绩、人员或财务数据。列表可以按需增减；没有资料时保留空列表。",
+  "company": {
+    "name": "",
+    "unified_social_credit_code": "",
+    "legal_representative": "",
+    "registered_capital": "",
+    "established_date": "",
+    "address": "",
+    "contact_person": "",
+    "phone": "",
+    "email": ""
+  },
+  "qualifications": [
+    {
+      "name": "",
+      "level": "",
+      "certificate_no": "",
+      "issuer": "",
+      "valid_until": "",
+      "note": ""
+    }
+  ],
+  "similar_projects": [
+    {
+      "project_name": "",
+      "owner": "",
+      "contract_amount": "",
+      "start_date": "",
+      "end_date": "",
+      "role": "",
+      "description": "",
+      "proof": ""
+    }
+  ],
+  "personnel": [
+    {
+      "name": "",
+      "role": "",
+      "title": "",
+      "certificate": "",
+      "certificate_no": "",
+      "experience_years": "",
+      "projects": "",
+      "note": ""
+    }
+  ],
+  "financials": [
+    {
+      "year": "",
+      "revenue": "",
+      "net_profit": "",
+      "total_assets": "",
+      "total_liabilities": "",
+      "audit_status": ""
+    }
+  ],
+  "credit": {
+    "rating": "",
+    "rating_agency": "",
+    "bank_credit": "",
+    "tax_rating": ""
+  },
+  "management_systems": [
+    {
+      "name": "",
+      "standard": "",
+      "certificate_no": "",
+      "valid_until": ""
+    }
+  ],
+  "safety": {
+    "production_license_no": "",
+    "valid_until": "",
+    "accident_record": ""
+  },
+  "commitments": [],
+  "capabilities": [],
+  "notes": ""
+}

@@ -7,8 +7,9 @@ FastAPI HTTP API。
 ## 技术栈
 
 - 后端：Python 3.12、uv、FastAPI、Celery + Redis、PyMuPDF、MinerU 云解析、
-  OpenAI SDK（DeepSeek / 智谱）、zai-sdk（embedding-3）、ChromaDB。
-- 规划中：SQLAlchemy + asyncpg、LangGraph、python-docx。
+  OpenAI SDK（DeepSeek / 智谱）、zai-sdk（embedding-3）、ChromaDB、LangGraph、
+  python-docx。
+- 规划中：SQLAlchemy + asyncpg；标书编写的 HTTP/Celery 入口。
 - 前端：React 19、TypeScript、Vite 8、Tailwind CSS 4、Electron 44（已有脚手架）。
 
 ## 快速开始
@@ -56,6 +57,52 @@ uv run python -m bidding inspect <doc_id> --query "评标办法 评分标准 资
 ```
 
 `ingest` 也可以直接接收 PDF 路径；`--force` 会强制重解析和重抽取。
+
+## 多 Agent 投标文件编写
+
+在解析和结构化抽取完成后，用 LangGraph 多 Agent 流程生成 Markdown 草稿和
+Word 文件：
+
+```bash
+# 1) 填写投标人资料（缺失字段会生成【待填写：...】，系统不编造事实）
+cp bidder_profile.example.json upload/bidder_profile.json
+
+# 2) 生成标书草稿、Word 和内部审查报告
+uv run python -m bidding write <doc_id>
+# 等价入口：uv run python -m src.cli write <doc_id>
+
+# 也可以指定资料和输出目录；--no-revise 跳过自动修订
+uv run python -m bidding write <doc_id> \
+  --profile upload/bidder_profile.json \
+  --output-dir upload/bids/<doc_id> \
+  --max-revisions 2
+```
+
+产物默认在 `upload/bids/<doc_id>/`：
+
+| 文件 | 内容 |
+| --- | --- |
+| `bid.md` | 可用于继续编辑的 Markdown 草稿 |
+| `bid.docx` | 带封面、目录、标题层级、表格、页眉页脚和页码的 Word 文件 |
+| `bid_review.md` | 内部审查报告：待填写/待核对清单、资料缺口、审查问题、评分响应矩阵、修订记录和生成警告 |
+| `bid_manifest.json` | 输入来源、章节结构、LLM 调用记录、统计、矩阵、警告与 Agent trace |
+
+流程与事实边界：
+
+- **分析师**：分析评标办法、资格条件和格式要求，给出响应策略与章节提示；只能
+  在固定大纲上补充最多 3 个章节，不能删除投标函、资格、报价、施工方案等必备章节。
+- **检索器**：本地按标题、路径、正文关键词和结构化抽取条目打分，返回带页码的
+  原文证据；不依赖 Chroma，保证 CLI 离线可审计。
+- **编写 Agent**：按行政/商务/技术三个角色顺序编写，共 11 个固定章节；提示词中
+  招标文件事实只来自解析产物，投标人事实只来自 profile。
+- **审查 Agent**：检查评分覆盖、强制要求、格式/签章、投标预算误用和未经资料
+  支持的事实；高优先级问题可触发最多 `--max-revisions` 个章节的自动修订。
+- **汇总器**：生成 Markdown/Word，并由系统（而非 LLM）把投标人资料渲染成
+  “投标人基本情况、资质、业绩、人员、财务”等附表，避免表格数据被改写。
+
+占位符约定：投标人资料缺失写 **【待填写：具体事项】**；招标文件事实缺失或无法
+逐字核对写 **【待核对：具体事项】**。`bid.md`/`bid.docx` 始终是待补齐草稿，
+提交前必须按 `bid_review.md` 逐项填写、核对签章和报价。
 
 ## HTTP API
 
@@ -188,8 +235,10 @@ uv run pytest
 
 测试覆盖页码分片、结构识别、抽取归一化/合并/grounding、单元构建、分块与页码映射、
 CLI 错误处理，以及 API 上传校验、202 轮询、可选抽取/入库、内存任务表、Redis
-任务状态与 TTL/文档锁、Celery 任务生命周期和双后端切换；全部为离线测试，不访问
-外部 API 或真实 Redis。
+任务状态与 TTL/文档锁、Celery 任务生命周期和双后端切换；标书编写部分覆盖
+profile 占位符、招标上下文与页码引用、固定大纲/评分矩阵、LangGraph 全流程、
+预算金额误用修订、Markdown/Word 产物和 CLI。全部为离线测试，不访问外部 API
+或真实 Redis。
 
 ## 前端
 

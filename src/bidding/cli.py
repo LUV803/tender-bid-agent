@@ -16,6 +16,7 @@ from .indexing import (
     run_ingest,
 )
 from .parsing import ParseError, parse_document
+from .writing import BidWriteError, write_bid
 
 
 def _print_manifest(manifest: dict) -> None:
@@ -145,6 +146,45 @@ def _cmd_inspect(args: argparse.Namespace) -> int:
         print(f"[{position}] distance={hit.get('distance')} "
               f"{metadata.get('section_path', '')} {metadata.get('page_hint', '')}")
         print(f"    {(hit.get('document') or '')[:220].replace(chr(10), ' ')}")
+    return 0
+
+
+def _cmd_write(args: argparse.Namespace) -> int:
+    if args.max_revisions < 0:
+        raise ValueError("--max-revisions 不能为负数")
+
+    def progress(message: str) -> None:
+        print(message, flush=True)
+
+    result = write_bid(
+        args.doc_id,
+        profile_path=args.profile,
+        output_dir=args.output_dir,
+        max_revisions=args.max_revisions,
+        enable_revision=not args.no_revise,
+        progress=progress,
+    )
+    manifest = result.manifest
+    stats = manifest.get("stats") or {}
+    print()
+    print(f"doc_id        : {result.doc_id}")
+    print(f"project       : {manifest.get('project', {}).get('project_name', '-')}")
+    print(f"bidder        : {manifest.get('bidder', {}).get('company_name', '-')}")
+    print(f"sections      : {stats.get('sections', 0)}")
+    print(f"draft_chars   : {stats.get('draft_chars', 0)}")
+    print(f"llm_calls     : {(manifest.get('llm') or {}).get('calls', 0)}")
+    print(f"revisions     : {stats.get('revisions', 0)}")
+    print(f"issues        : {stats.get('issues', 0)} "
+          f"(high={stats.get('high_issues', 0)}, "
+          f"medium={stats.get('medium_issues', 0)}, low={stats.get('low_issues', 0)})")
+    print(f"pending       : {stats.get('pending_markers', 0)} 类待填写/待核对标记")
+    for warning in manifest.get("warnings") or []:
+        print(f"warning       : {warning}")
+    print(f"markdown      : {result.markdown_path}")
+    print(f"docx          : {result.docx_path}")
+    print(f"review        : {result.review_path}")
+    print(f"manifest      : {result.manifest_path}")
+    print("提示          : bid.md/bid.docx 是待人工补齐的草稿；提交前必须阅读 bid_review.md")
     return 0
 
 
@@ -280,6 +320,33 @@ def build_parser() -> argparse.ArgumentParser:
     inspect_parser.add_argument("--top-k", type=int, default=5, help="返回条数")
     inspect_parser.set_defaults(func=_cmd_inspect)
 
+    write_parser = subparsers.add_parser(
+        "write", help="按招标文件多 Agent 生成投标文件（Markdown + Word）"
+    )
+    write_parser.add_argument("doc_id", help="已完成抽取的文档 ID")
+    write_parser.add_argument(
+        "--profile",
+        default=None,
+        help="投标人资料 JSON；默认 upload/bidder_profile.json（模板见 bidder_profile.example.json）",
+    )
+    write_parser.add_argument(
+        "--output-dir",
+        default=None,
+        help="输出目录；默认 upload/bids/<doc_id>",
+    )
+    write_parser.add_argument(
+        "--no-revise",
+        action="store_true",
+        help="跳过审查后的自动修订（仍会生成审查报告）",
+    )
+    write_parser.add_argument(
+        "--max-revisions",
+        type=int,
+        default=2,
+        help="最多自动修订的章节数（默认 2）",
+    )
+    write_parser.set_defaults(func=_cmd_write)
+
     doctor_parser = subparsers.add_parser("doctor", help="检查配置与服务连通性")
     doctor_parser.set_defaults(func=_cmd_doctor)
     return parser
@@ -291,7 +358,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         return int(args.func(args))
-    except (ParseError, ExtractError, IngestError, ValueError, OSError) as exc:
+    except (ParseError, ExtractError, IngestError, BidWriteError, ValueError, OSError) as exc:
         print(f"错误：{exc}", file=sys.stderr)
         return 1
 

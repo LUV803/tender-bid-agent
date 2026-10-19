@@ -23,3 +23,7 @@ chroma_db/
 # Local dev tools and Redis data
 .tools/
 redis_data/
+
+# Runtime uploads, parsed artifacts and generated bids
+upload/
+

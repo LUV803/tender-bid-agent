@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 项目概况
 
-`bidding` 项目目前处于脚手架阶段，尚无后端业务代码。技术栈如下：
+`bidding` 项目用于招标文件解析、结构化抽取、检索索引与多 Agent 标书编写。技术栈如下：
 
 - **后端**：Python 3.12 + FastAPI/uvicorn；SQLAlchemy 2.0 + asyncpg；Celery + Redis；ChromaDB 向量库；LangGraph；OpenAI SDK / zai-sdk；python-docx / PyMuPDF。
 - **前端**：React 19 + TypeScript + Vite 8 + Tailwind CSS 4；Electron 44 桌面外壳。
@@ -17,14 +17,20 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## 目录结构
 
 ```text
-src/bidding/                  Python 包（src 布局）；目前仅 __init__.py
+src/bidding/                  Python 包（src 布局）
+src/bidding/cli.py            命令行入口：doctor / parse
+src/bidding/config.py         .env 配置与路径约定
+src/bidding/models.py         解析、抽取、索引共用数据结构
+src/bidding/parsing/          PDF 解析：结构还原、PyMuPDF、MinerU、产物落盘
 frontend/src/                 React 前端源码
 frontend/electron/main.cjs    Electron 主进程
+upload/                       运行时上传、解析、图片与标书产物（git 忽略）
 redis.conf                    Redis 本地开发配置
 .tools/                       本机下载的 Redis 可执行文件（git 忽略，不入库）
 redis_data/                   Redis 持久化数据（git 忽略）
 chroma_db/                    ChromaDB 持久化数据（git 忽略）
 .env                          本地环境变量与密钥（git 忽略，禁止提交）
+.env.example                  配置模板（密钥为空，可入库）
 ```
 
 ## 常用命令
@@ -36,7 +42,12 @@ uv sync                  # 按 uv.lock 同步依赖
 uv add <package>         # 新增运行时依赖
 uv add --dev <package>   # 新增开发依赖
 uv run pytest            # 运行测试（当前尚无测试文件）
+uv run python -m bidding doctor                         # 检查配置与本地服务
+uv run python -m bidding parse <pdf> --parser auto      # 解析 PDF
+uv run python -m bidding.parsing <pdf>                  # 等价的快捷入口
 ```
+
+解析产物在 `upload/parsed/<doc_id>/`：`content.md` 为带页码注释的权威全文，`manifest.json` 为摘要（不含全文），`raw/sections.json` 保存章节正文缓存；图片在 `upload/images/<doc_id>/`。`auto` 模式优先 MinerU，未配置 `MINERU_API_KEY` 时按设计跳过云端并使用 PyMuPDF 本地解析，降级原因会写入 manifest。
 
 ### 前端
 

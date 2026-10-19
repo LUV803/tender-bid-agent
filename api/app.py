@@ -13,12 +13,12 @@ from fastapi import FastAPI, File, HTTPException, Query, Response, UploadFile, s
 from pydantic import BaseModel
 
 from bidding.config import Settings, get_settings
-from bidding.extraction import run_extract
-from bidding.indexing import run_ingest
-from bidding.parsing import parse_document
+from bidding.job_pipeline import execute_pipeline
+from bidding.job_state import JobBackendError, JobConflict, RedisJobStore
 from bidding.parsing.structure import sanitize_doc_id, sanitize_filename
 
-from .jobs import Job, JobConflict, JobQueueFull, JobRunner, JobStore
+from .celery_runner import CeleryJobRunner
+from .jobs import JobQueueFull, JobRunner, JobStore
 
 ParserName = Literal["auto", "cloud", "local"]
 JobStatus = Literal["queued", "running", "succeeded", "failed"]
@@ -103,52 +103,31 @@ async def _save_upload(
     return digest.hexdigest()
 
 
-def run_pipeline(job: Job, store: JobStore) -> None:
-    """Parse the uploaded PDF and optionally extract and index it."""
-
-    def progress(message: str) -> None:
-        store.add_progress(job.id, message)
-
-    try:
-        store.set_stage(job.id, "parse")
-        progress(f"开始解析：{job.filename}")
-        manifest = parse_document(job.source_path, parser=job.parser)
-        store.set_result(job.id, "parse", manifest)
-        doc_id = str(manifest.get("doc_id") or job.doc_id)
-        if doc_id != job.doc_id:
-            store.set_doc_id(job.id, doc_id)
-        progress(f"解析完成：{doc_id}（{manifest.get('pages', 0)} 页）")
-
-        if job.extract:
-            store.set_stage(job.id, "extract")
-            progress("开始结构化抽取")
-            extraction = run_extract(doc_id, progress=progress)
-            store.set_result(job.id, "extract", extraction)
-
-        if job.ingest:
-            store.set_stage(job.id, "ingest")
-            progress("开始分块、嵌入并写入 Chroma")
-            index = run_ingest(doc_id, progress=progress)
-            store.set_result(job.id, "ingest", index)
-    finally:
-        shutil.rmtree(job.upload_dir, ignore_errors=True)
+def _default_runner(settings: Settings) -> JobRunner | CeleryJobRunner:
+    """Build the configured job backend without touching Redis yet."""
+    backend = (settings.task_backend or "celery").strip().lower()
+    if backend == "celery":
+        return CeleryJobRunner(RedisJobStore(settings))
+    if backend == "memory":
+        return JobRunner(
+            JobStore(
+                max_jobs=settings.api_max_jobs,
+                ttl_seconds=settings.api_job_ttl_seconds,
+            ),
+            execute_pipeline,
+            max_workers=settings.api_job_workers,
+        )
+    raise RuntimeError(f"未知 TASK_BACKEND：{backend}（可选 celery 或 memory）")
 
 
 def create_app(
     *,
     settings: Settings | None = None,
-    runner: JobRunner | None = None,
+    runner: JobRunner | CeleryJobRunner | None = None,
 ) -> FastAPI:
     settings = settings or get_settings()
     if runner is None:
-        runner = JobRunner(
-            JobStore(
-                max_jobs=settings.api_max_jobs,
-                ttl_seconds=settings.api_job_ttl_seconds,
-            ),
-            run_pipeline,
-            max_workers=settings.api_job_workers,
-        )
+        runner = _default_runner(settings)
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
@@ -211,6 +190,7 @@ def create_app(
 
             try:
                 snapshot = runner.submit(
+                    job_id=job_id,
                     filename=filename,
                     doc_id=doc_id,
                     parser=parser,
@@ -223,7 +203,7 @@ def create_app(
                 raise HTTPException(
                     status_code=status.HTTP_409_CONFLICT, detail=str(exc)
                 ) from exc
-            except JobQueueFull as exc:
+            except (JobQueueFull, JobBackendError) as exc:
                 raise HTTPException(
                     status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
                 ) from exc
@@ -255,10 +235,18 @@ def create_app(
         "/api/jobs/{job_id}",
         response_model=JobResponse,
         summary="查询任务状态与结果",
-        responses={404: {"description": "任务不存在或已过期"}},
+        responses={
+            404: {"description": "任务不存在或已过期"},
+            503: {"description": "任务状态存储暂不可用"},
+        },
     )
     def get_job(job_id: str) -> JobResponse:
-        snapshot = runner.store.snapshot(job_id)
+        try:
+            snapshot = runner.store.snapshot(job_id)
+        except JobBackendError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
+            ) from exc
         if snapshot is None:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,

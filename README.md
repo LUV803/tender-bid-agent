@@ -6,9 +6,9 @@ FastAPI HTTP API。
 
 ## 技术栈
 
-- 后端：Python 3.12、uv、FastAPI、PyMuPDF、MinerU 云解析、OpenAI SDK
-  （DeepSeek / 智谱）、zai-sdk（embedding-3）、ChromaDB。
-- 规划中：Celery + Redis 分布式任务、SQLAlchemy + asyncpg、LangGraph、python-docx。
+- 后端：Python 3.12、uv、FastAPI、Celery + Redis、PyMuPDF、MinerU 云解析、
+  OpenAI SDK（DeepSeek / 智谱）、zai-sdk（embedding-3）、ChromaDB。
+- 规划中：SQLAlchemy + asyncpg、LangGraph、python-docx。
 - 前端：React 19、TypeScript、Vite 8、Tailwind CSS 4、Electron 44（已有脚手架）。
 
 ## 快速开始
@@ -17,13 +17,19 @@ FastAPI HTTP API。
 uv sync
 cp .env.example .env        # 填入 API key；.env 已被 git 忽略
 
-# 可选：启动 Redis 与 Chroma
+# 必需：Redis（API 默认使用 Redis + Celery 后台任务）
 .tools\redis-8.10.2\Redis-8.10.2-Windows-x64-msys2\redis-server.exe redis.conf
+
+# 另开终端：Celery worker（Windows 必须 --pool=solo）
+uv run celery -A bidding.celery_app worker --loglevel=info --pool=solo --queues=bidding
+
+# 仅在需要入库/检索时启动 Chroma
 uv run chroma run --path ./chroma_db
 ```
 
 Windows 上请保留 `.env` 中的 `NO_PROXY=localhost,127.0.0.1`，否则系统代理可能
-拦截对本地 Chroma 的请求。Redis 需 8.x（redis-py 8 默认发送 `HELLO 3`）。
+拦截对本地 Chroma 的请求。Redis 需 8.x（redis-py 8 默认发送 `HELLO 3`）。API
+与 worker 必须在同一项目目录运行并共享 `upload/` 文件系统。
 
 ## CLI
 
@@ -54,12 +60,20 @@ uv run python -m bidding inspect <doc_id> --query "评标办法 评分标准 资
 ## HTTP API
 
 ```bash
-# 默认 127.0.0.1:8001，端口在 .env 的 API_HOST / API_PORT 配置
+# 终端 1：Celery worker（Windows 必须 solo pool）
+uv run celery -A bidding.celery_app worker --loglevel=info --pool=solo --queues=bidding
+
+# 终端 2：默认 127.0.0.1:8001，端口在 .env 的 API_HOST / API_PORT 配置
 uv run python -m api
 # 等价：uv run uvicorn api.app:app --host 127.0.0.1 --port 8001
+
+# 连通性检查：result 应包含 "pong"
+uv run celery -A bidding.celery_app call bidding.ping
 ```
 
 接口文档：<http://127.0.0.1:8001/docs>（端口 8001 避免与 Chroma 的 8000 冲突）。
+API 进程只负责收文件、写 Redis 任务记录和投递 Celery 消息；解析、抽取和入库都在
+worker 中执行，因此 POST 会立即返回。
 
 ### 上传并创建解析任务
 
@@ -98,12 +112,32 @@ curl "http://127.0.0.1:8001/api/jobs/<job_id>"
   `parse`（manifest）、`extract`（抽取结果）和 `ingest`（索引 manifest）。
 - 抽取通常需要 2–4 分钟，客户端只需轮询，不要为 POST 设置长读超时。
 
-任务表保存在进程内存中：服务重启会丢失任务记录，但 `upload/parsed/<doc_id>/`
-下的解析、抽取与索引产物仍在。也正因如此，必须以单 worker 运行（`python -m api`
-默认如此）；`uvicorn --workers N` 会让轮询请求落到其他进程并返回 404。同一
-`doc_id` 同时只允许一个排队/执行中的任务（重复上传返回 409）；任务表容量与
-保留时间由 `API_MAX_JOBS`、`API_JOB_TTL_SECONDS` 控制，并发执行数由
-`API_JOB_WORKERS` 控制。
+任务记录与进度保存在 Redis（`bidding:job:<id>`、`bidding:active-doc:<doc_id>`），
+结果随阶段完成写入任务哈希；Celery 结果后端只保存很小的任务返回值。API 重启不会
+中断正在执行的任务，轮询记录也不会丢，记录在 `API_JOB_TTL_SECONDS`（默认 24 小时）
+后过期。API 与 worker 必须共享 `upload/` 文件系统。
+
+同一 `doc_id` 同时只允许一个排队/执行中的任务（Redis 原子锁，重复上传返回 409），
+避免多个 worker 同时写 `upload/parsed/<doc_id>/`。Redis 或 broker 不可用时，提交
+返回 503；轮询在 Redis 不可用时同样返回 503。
+
+Windows 上 worker 请使用 `--pool=solo`；需要并发时在 POSIX 主机上运行 prefork
+worker，或在本机启动多个 solo worker（自行控制 CPU 与 API 配额）。硬/软超时由
+`CELERY_TASK_TIME_LIMIT`、`CELERY_SOFT_TIME_LIMIT` 控制；Windows 的 solo pool
+对软超时支持有限，以硬超时为准。
+
+本地快速调试可切回进程内线程池，不需要 Redis 和 worker：
+
+```bash
+TASK_BACKEND=memory uv run python -m api
+```
+
+```powershell
+$env:TASK_BACKEND="memory"; uv run python -m api
+```
+
+memory 模式下任务表随 API 进程重启丢失，必须以单进程运行；并发数与容量由
+`API_JOB_WORKERS`、`API_MAX_JOBS` 控制，`API_JOB_TTL_SECONDS` 控制记录过期。
 
 ## 解析策略
 
@@ -153,8 +187,9 @@ uv run pytest
 ```
 
 测试覆盖页码分片、结构识别、抽取归一化/合并/grounding、单元构建、分块与页码映射、
-CLI 错误处理，以及 API 上传校验、202 轮询、可选抽取/入库和任务状态管理；全部为
-离线测试，不访问外部 API。
+CLI 错误处理，以及 API 上传校验、202 轮询、可选抽取/入库、内存任务表、Redis
+任务状态与 TTL/文档锁、Celery 任务生命周期和双后端切换；全部为离线测试，不访问
+外部 API 或真实 Redis。
 
 ## 前端
 

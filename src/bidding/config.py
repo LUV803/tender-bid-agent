@@ -75,6 +75,13 @@ class Settings:
     api_job_ttl_seconds: int
     api_max_jobs: int
 
+    task_backend: str
+    celery_broker_url: str
+    celery_result_backend: str
+    celery_result_expires: int
+    celery_task_time_limit: int
+    celery_soft_time_limit: int
+
     llm_provider: str
     deepseek_api_key: str
     deepseek_model: str
@@ -190,6 +197,16 @@ def get_settings() -> Settings:
         api_job_workers=_env_int("API_JOB_WORKERS", 2),
         api_job_ttl_seconds=_env_int("API_JOB_TTL_SECONDS", 86400),
         api_max_jobs=_env_int("API_MAX_JOBS", 100),
+        task_backend=_env_str("TASK_BACKEND", "celery").lower(),
+        celery_broker_url=_env_str(
+            "CELERY_BROKER_URL", "redis://localhost:6379/0"
+        ),
+        celery_result_backend=_env_str(
+            "CELERY_RESULT_BACKEND", "redis://localhost:6379/1"
+        ),
+        celery_result_expires=_env_int("CELERY_RESULT_EXPIRES", 86400),
+        celery_task_time_limit=_env_int("CELERY_TASK_TIME_LIMIT", 7200),
+        celery_soft_time_limit=_env_int("CELERY_SOFT_TIME_LIMIT", 6900),
         llm_provider=_env_str("LLM_PROVIDER", "deepseek").lower(),
         deepseek_api_key=_env_str("DEEPSEEK_API_KEY"),
         deepseek_model=_env_str("DEEPSEEK_MODEL", "deepseek-chat"),

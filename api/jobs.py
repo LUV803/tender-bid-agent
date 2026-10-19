@@ -1,9 +1,10 @@
 """In-memory job table and background runner for the parse API.
 
-Jobs live only in this process.  A restart loses every job record (and any
-running work); document artifacts already written under ``upload/`` remain on
-disk.  The table is bounded by ``API_MAX_JOBS`` and ``API_JOB_TTL_SECONDS`` so
-long-running services do not accumulate results forever.
+This is the fallback backend (``TASK_BACKEND=memory``) and the backend used by
+offline tests.  Jobs live only in this process: a restart loses every record
+(and any running work), while artifacts already written under ``upload/``
+remain on disk.  The table is bounded by ``API_MAX_JOBS`` and
+``API_JOB_TTL_SECONDS``.  Production defaults to the Redis + Celery backend.
 """
 
 from __future__ import annotations
@@ -18,9 +19,19 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 
+from bidding.job_state import JobConflict
 from bidding.models import now_iso
 
 logger = logging.getLogger(__name__)
+
+__all__ = [
+    "Job",
+    "JobConflict",
+    "JobNotFound",
+    "JobQueueFull",
+    "JobRunner",
+    "JobStore",
+]
 
 ACTIVE_STATUSES = {"queued", "running"}
 FINISHED_STATUSES = {"succeeded", "failed"}
@@ -32,10 +43,6 @@ Work = Callable[["Job", "JobStore"], None]
 
 class JobNotFound(KeyError):
     """Raised when a job id is unknown (or has expired)."""
-
-
-class JobConflict(RuntimeError):
-    """Raised when another active job is already using the same doc_id."""
 
 
 class JobQueueFull(RuntimeError):
@@ -102,13 +109,14 @@ class JobStore:
         ingest: bool,
         upload_dir: Path,
         source_path: Path,
+        job_id: str | None = None,
     ) -> Job:
         """Register a queued job.
 
         Only one queued/running job may target a doc_id, because parsing writes
         to a shared ``upload/parsed/<doc_id>`` directory.
         """
-        job_id = uuid.uuid4().hex
+        job_id = job_id or uuid.uuid4().hex
         with self._lock:
             self._prune_locked()
             if any(

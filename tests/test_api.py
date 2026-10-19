@@ -11,9 +11,10 @@ from typing import Any
 import pytest
 from fastapi.testclient import TestClient
 
-from api.app import create_app, run_pipeline
+from api.app import create_app
 from api.jobs import JobRunner, JobStore
 from bidding.config import Settings, get_settings
+from bidding.job_pipeline import execute_pipeline
 from bidding.parsing import ParseError
 
 PDF_BYTES = b"%PDF-1.4\n1 0 obj\n<< /Type /Catalog >>\nendobj\n%%EOF\n"
@@ -143,14 +144,14 @@ def test_optional_extract_and_ingest_stages(
             progress("入库进度")
         return {"chunks": 3}
 
-    monkeypatch.setattr("api.app.parse_document", fake_parse)
-    monkeypatch.setattr("api.app.run_extract", fake_extract)
-    monkeypatch.setattr("api.app.run_ingest", fake_ingest)
+    monkeypatch.setattr("bidding.job_pipeline.parse_document", fake_parse)
+    monkeypatch.setattr("bidding.job_pipeline.run_extract", fake_extract)
+    monkeypatch.setattr("bidding.job_pipeline.run_ingest", fake_ingest)
 
     settings = _settings(tmp_path)
     runner = JobRunner(
         JobStore(max_jobs=5, ttl_seconds=3600),
-        run_pipeline,
+        execute_pipeline,
         executor=_InlineExecutor(),
     )
     client = _client(settings, runner)
@@ -187,11 +188,11 @@ def test_pipeline_failure_is_reported_and_upload_is_cleaned(
     def broken_parse(source: Path, *, parser: str = "auto") -> dict[str, Any]:
         raise ParseError("PDF 已损坏")
 
-    monkeypatch.setattr("api.app.parse_document", broken_parse)
+    monkeypatch.setattr("bidding.job_pipeline.parse_document", broken_parse)
     settings = _settings(tmp_path)
     runner = JobRunner(
         JobStore(max_jobs=5, ttl_seconds=3600),
-        run_pipeline,
+        execute_pipeline,
         executor=_InlineExecutor(),
     )
     client = _client(settings, runner)
@@ -216,7 +217,7 @@ def test_rejects_non_pdf_filename_and_missing_header(tmp_path: Path) -> None:
     settings = _settings(tmp_path)
     runner = JobRunner(
         JobStore(max_jobs=5, ttl_seconds=3600),
-        run_pipeline,
+        execute_pipeline,
         executor=_InlineExecutor(),
     )
 
@@ -243,7 +244,7 @@ def test_rejects_oversized_upload(tmp_path: Path) -> None:
     settings = _settings(tmp_path, api_max_upload_mb=0)
     runner = JobRunner(
         JobStore(max_jobs=5, ttl_seconds=3600),
-        run_pipeline,
+        execute_pipeline,
         executor=_InlineExecutor(),
     )
 
@@ -263,7 +264,7 @@ def test_invalid_parser_and_unknown_job(tmp_path: Path) -> None:
     settings = _settings(tmp_path)
     runner = JobRunner(
         JobStore(max_jobs=5, ttl_seconds=3600),
-        run_pipeline,
+        execute_pipeline,
         executor=_InlineExecutor(),
     )
 

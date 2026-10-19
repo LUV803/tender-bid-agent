@@ -24,9 +24,14 @@ src/bidding/models.py         解析、抽取、索引共用数据结构
 src/bidding/parsing/          PDF 解析：结构还原、PyMuPDF、MinerU、产物落盘
 src/bidding/extraction/       结构化抽取：章节单元、LLM 容错、归一化/合并/grounding
 src/bidding/indexing/         检索索引：分块、智谱 embedding、Chroma 读写与自检
+src/bidding/job_pipeline.py   解析 → 抽取 → 入库的共享流水线
+src/bidding/job_state.py      Redis 任务状态、进度、TTL 与 doc_id 互斥锁
+src/bidding/celery_app.py     Celery 应用、队列、超时与 broker 配置
+src/bidding/tasks.py          Celery ping / parse_pipeline 任务
 api/                          FastAPI 应用（根目录应用层，导入 bidding 包）
-api/app.py                    上传解析接口、轮询接口与任务流水线
-api/jobs.py                   内存任务表、线程池执行器与过期清理
+api/app.py                    上传解析接口、轮询接口与任务后端选择
+api/celery_runner.py          默认的 Celery 投递器（写 Redis 后 enqueue）
+api/jobs.py                   内存任务表与线程池（TASK_BACKEND=memory 与测试）
 api/__main__.py               `python -m api` 启动入口
 tests/                        离线 pytest 测试
 frontend/src/                 React 前端源码
@@ -66,11 +71,22 @@ uv run python -m bidding inspect <doc_id> --query "评标办法"  # 检索测试
 ### HTTP API
 
 ```bash
-uv run python -m api                      # 读取 API_HOST / API_PORT，默认 127.0.0.1:8001
+# 终端 1：Celery worker（Windows 必须 --pool=solo）
+uv run celery -A bidding.celery_app worker --loglevel=info --pool=solo --queues=bidding
+
+# 终端 2：读取 API_HOST / API_PORT，默认 127.0.0.1:8001
+uv run python -m api
 uv run uvicorn api.app:app --host 127.0.0.1 --port 8001
+
+# 连通性检查，返回值应为 "pong"
+uv run celery -A bidding.celery_app call bidding.ping
 ```
 
-`POST /api/parse` 以 multipart `file` 字段上传 PDF，立即返回 202、`job_id` 与 `status_url`；`GET /api/jobs/{job_id}` 返回 `status`、`stage`、`progress` 与分阶段 `result`。`parser`、`extract`、`ingest` 是查询参数，`extract` 与 `ingest` 相互独立。任务表只存在进程内存中，重启即丢失（已落盘的 `upload/parsed/` 产物保留），因此必须以单 worker 运行，不能使用 `uvicorn --workers N`；同一 `doc_id` 同时只允许一个排队/执行中的任务。容量、完成记录保留时间与并发数分别由 `API_MAX_JOBS`、`API_JOB_TTL_SECONDS`、`API_JOB_WORKERS` 控制。默认端口 8001，Swagger 在 `/docs`。
+`POST /api/parse` 以 multipart `file` 字段上传 PDF，立即返回 202、`job_id` 与 `status_url`；`GET /api/jobs/{job_id}` 返回 `status`、`stage`、`progress` 与分阶段 `result`。`parser`、`extract`、`ingest` 是查询参数，`extract` 与 `ingest` 相互独立。
+
+默认 `TASK_BACKEND=celery`：API 把上传保存到 `upload/tmp/<job_id>/`，在 Redis 创建任务记录后投递 Celery；worker 调用共享的 `job_pipeline.execute_pipeline`，状态、进度和阶段结果写回 Redis（`bidding:job:*`），Celery 结果后端只保存很小的任务返回值。API 重启不会丢失任务记录或中断 worker，记录在 `API_JOB_TTL_SECONDS` 后过期；API 与 worker 必须共享 `upload/` 文件系统。同一 `doc_id` 由 Redis 原子锁互斥（重复上传 409）；Redis/broker 不可用时提交与轮询返回 503。Windows 只能使用 `--pool=solo`；状态在 Redis，因此 `uvicorn --workers N` 可以正常轮询。
+
+`TASK_BACKEND=memory` 回退到 `api/jobs.py` 的进程内任务表 + 线程池，仅用于离线测试或单进程调试：重启丢任务，不能使用 `uvicorn --workers N`，容量、保留时间与并发数由 `API_MAX_JOBS`、`API_JOB_TTL_SECONDS`、`API_JOB_WORKERS` 控制。默认端口 8001，Swagger 在 `/docs`。
 
 ### 前端
 
@@ -89,15 +105,22 @@ Electron 主进程带 `--dev` 参数时加载 `http://localhost:5173`，否则�
 在项目根目录执行：
 
 ```powershell
-# Redis（127.0.0.1:6379，无密码）
+# Redis（127.0.0.1:6379，无密码；任务状态 + Celery broker）
 .tools\redis-8.10.2\Redis-8.10.2-Windows-x64-msys2\redis-server.exe redis.conf
 
-# ChromaDB（http://localhost:8000）
+# Celery worker（Windows 必须 solo；保持前台或另开终端）
+uv run celery -A bidding.celery_app worker --loglevel=info --pool=solo --queues=bidding
+
+# 验证 worker 可达，result 中应出现 "pong"
+uv run celery -A bidding.celery_app call bidding.ping
+
+# ChromaDB（http://localhost:8000，仅入库/检索时需要）
 uv run chroma run --path ./chroma_db
 ```
 
 - FastAPI/uvicorn 默认端口也是 8000，启动后端时使用 `--port 8001`（或为 Chroma 指定其他端口），避免冲突。
 - Redis 版本需支持 RESP3（当前为 8.10.2）；redis-py 8.x 默认发送 `HELLO 3`，Redis 5 等旧版本会连接失败。
+- Redis 同时承载任务状态（`REDIS_URL`，db 0）和 Celery broker（`CELERY_BROKER_URL`，db 0）；结果后端在 db 1。键前缀 `bidding:` 避免冲突。
 - Windows 系统代理会影响 Python 对 localhost 的 HTTP 请求。`.env` 已配置 `NO_PROXY=localhost,127.0.0.1`；运行 Chroma 客户端前需确保该变量已加载，否则请求可能返回 502。
 
 ## 环境要求与约定
@@ -107,5 +130,6 @@ uv run chroma run --path ./chroma_db
 - SQLAlchemy 固定为 2.0.x（`>=2.0,<2.1`）。
 - Tailwind CSS v4 通过 `@tailwindcss/vite` 插件接入，入口是 `frontend/src/index.css` 中的 `@import "tailwindcss";`，无需 `tailwind.config.js`。
 - `.env` 包含 LLM（DeepSeek/智谱）、PostgreSQL、Redis、Chroma、MinerU 等配置，已被 `.gitignore` 排除；不要提交或打印其中的密钥。
+- API 任务后端由 `TASK_BACKEND` 选择：`celery`（默认，需 Redis + worker）或 `memory`（单进程调试）。Celery broker/结果后端与超时由 `CELERY_*` 配置；运行 worker 前先加载 `.env`（`uv run` 会自动读取 `config.py` 的 `load_dotenv`）。
 - 聊天模型由 `LLM_PROVIDER` 选择 `deepseek` 或 `zhipu`。DeepSeek key 不可用时可切换为 `LLM_PROVIDER=zhipu` + `ZHIPU_CHAT_MODEL=glm-4-plus`，无需改代码；嵌入固定走智谱 `embedding-3`。
 - 修改功能后运行相关检查（`uv run pytest`、`npm --prefix frontend run build`），并按「固定任务」创建提交。

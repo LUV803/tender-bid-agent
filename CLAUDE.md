@@ -32,13 +32,19 @@ src/bidding/job_state.py      Redis 任务状态、进度、TTL 与 doc_id 互�
 src/bidding/celery_app.py     Celery 应用、队列、超时与 broker 配置
 src/bidding/tasks.py          Celery ping / parse_pipeline / write_bid 任务
 api/                          FastAPI 应用（根目录应用层，导入 bidding 包）
-api/app.py                    上传解析、异步写标、轮询接口与任务后端选择
+api/app.py                    上传解析、异步写标、轮询、文档库/历史/文件接口与任务后端选择
+api/library.py                只读扫描 upload/parsed 与 upload/bids，白名单文件预览
 api/celery_runner.py          默认的 Celery 投递器（按 kind 路由 parse/bid）
 api/jobs.py                   内存任务表与线程池（TASK_BACKEND=memory 与测试）
 api/__main__.py               `python -m api` 启动入口
 tests/                        离线 pytest 测试
 frontend/src/                 React 前端源码
-frontend/electron/main.cjs    Electron 主进程
+frontend/src/api.ts           类型化 API 客户端、API_BASE 与 artifact 文本读取
+frontend/src/hooks.ts         任务轮询、健康检查与列表数据加载 hooks
+frontend/src/views/           上传解析、投标编写、文档库、历史产物四个工作区
+frontend/src/components/      UI 基础组件、报告、Markdown 预览与模态框
+frontend/electron/main.cjs    Electron 主进程；`bidding:open-bid-folder` IPC 仅允许 upload/bids
+frontend/electron/preload.cjs contextBridge 暴露受限桌面能力
 upload/                       运行时上传、解析、图片与标书产物（git 忽略）
 redis.conf                    Redis 本地开发配置
 .tools/                       本机下载的 Redis 可执行文件（git 忽略，不入库）
@@ -93,6 +99,8 @@ uv run celery -A bidding.celery_app call bidding.ping
 
 `POST /api/bids` 接受 JSON `{"doc_id","profile","max_sections","max_revisions"}`：`profile` 是对象（≤2 MB，字段同 `bidder_profile.json`），无需文件上传。要求该 `doc_id` 已有解析与抽取产物，否则 404/409。API 把 profile 写到 `upload/tmp/<job_id>/bidder_profile.json` 并投递 `bidding.write_bid`；返回同样的 202/`job_id`/`status_url`，轮询同一任务接口，`kind=bid`、`stage=write`、`result.bid` 为摘要。`max_sections` 0–3（默认 0），`max_revisions` 0–10（默认 2）；写标与解析任务共用同一 `doc_id` 锁。
 
+只读工作台接口：`GET /api/health` 返回服务与任务后端；`GET /api/documents` 扫描 `upload/parsed/`（含关联标书摘要）；`GET /api/bids` 扫描 `upload/bids/`；`GET /api/bids/{doc_id}` 返回评分项覆盖、章节映射、审查问题与待填写清单；`GET /api/bids/{doc_id}/files/{filename}?download=` 预览/下载四个白名单产物。`api/library.py` 负责路径校验，`doc_id` 必须是安全目录名，文件名仅限 `bid.md`、`bid.docx`、`bid_review.md`、`bid_manifest.json`。CORS 仅允许 localhost/127.0.0.1 任意端口与 Electron `null` 源。覆盖报告是评分项到章节的映射，不代表实际得分。
+
 默认 `TASK_BACKEND=celery`：API 把上传/临时 profile 保存到 `upload/tmp/<job_id>/`，在 Redis 创建任务记录后按 `kind` 投递 Celery；worker 调用共享的 `job_pipeline.execute_pipeline` 或 `execute_bid_job`，状态、进度和阶段结果写回 Redis（`bidding:job:*`），Celery 结果后端只保存很小的任务返回值。API 重启不会丢失任务记录或中断 worker，记录在 `API_JOB_TTL_SECONDS` 后过期；API 与 worker 必须共享 `upload/` 文件系统。同一 `doc_id` 由 Redis 原子锁互斥（重复上传 409）；Redis/broker 不可用时提交与轮询返回 503。Windows 只能使用 `--pool=solo`；状态在 Redis，因此 `uvicorn --workers N` 可以正常轮询。
 
 `TASK_BACKEND=memory` 回退到 `api/jobs.py` 的进程内任务表 + 线程池，仅用于离线测试或单进程调试：重启丢任务，不能使用 `uvicorn --workers N`，容量、保留时间与并发数由 `API_MAX_JOBS`、`API_JOB_TTL_SECONDS`、`API_JOB_WORKERS` 控制。默认端口 8001，Swagger 在 `/docs`。
@@ -107,7 +115,11 @@ npm --prefix frontend run electron:dev    # 需先启动 dev server；加载 loc
 npm --prefix frontend run electron:start  # 先构建，再加载 dist/index.html
 ```
 
-Electron 主进程带 `--dev` 参数时加载 `http://localhost:5173`，否则加载 `frontend/dist/index.html`。因此 Vite 配置了 `base: './'`，不要移除。Vite 固定使用 5173 端口（`strictPort`）。
+Electron 主进程带 `--dev` 参数时加载 `http://localhost:5173`，否则加载 `frontend/dist/index.html`。因此 Vite 配置了 `base: './'`，不要移除。Vite 固定使用 5173 端口（`strictPort`），开发时 `/api` 代理到 `http://127.0.0.1:8001`；`file://` 构建默认直连 8001，可用 `VITE_API_BASE_URL` 覆盖。`api.ts` 负责这一选择。
+
+工作台为左侧步骤导航 + 右侧工作区，四个页面始终挂载并用 `hidden` 切换，以便保留上传/编写任务状态：上传解析（拖拽 PDF、解析器与抽取/入库选项、轮询阶段与摘要）、投标编写（表单 + 高级 JSON 双向同步、参数、评分覆盖与审查报告）、文档库（`upload/parsed/` 列表、直接发起编写）、历史产物（`upload/bids/` 列表、Markdown 预览与下载）。预览使用 `react-markdown` + `remark-gfm`，不启用原始 HTML，并隐藏内部页码/分页注释。
+
+Electron 通过 `preload.cjs` 的 contextBridge 暴露 `openBidFolder`；主进程 IPC `bidding:open-bid-folder` 只允许 `upload/bids` 下的目录，并使用 `shell.openPath` 打开。不要放宽该路径校验，也不要在渲染进程启用 Node 集成。
 
 ### 本地服务
 

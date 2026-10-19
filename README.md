@@ -1,8 +1,8 @@
 # bidding
 
 招标文件解析、结构化抽取、检索索引与多 Agent 标书编写。当前已打通单文档的
-**解析 → 结构化抽取 → 分块嵌入 → Chroma 检索自检** 流水线，入口为 CLI 与
-FastAPI HTTP API。
+**解析 → 结构化抽取 → 分块嵌入 → Chroma 检索自检 → 多 Agent 标书编写** 流水线，
+入口为 CLI、FastAPI HTTP API 与 React/Electron 工作台。
 
 ## 技术栈
 
@@ -209,6 +209,26 @@ curl -X POST "http://127.0.0.1:8001/api/bids" \
   Celery 任务 `bidding.write_bid` 读取并在结束后删除；API 与 worker 必须共享
   `upload/` 文件系统。
 
+### 文档库、历史产物与文件预览
+
+前端工作台使用以下只读接口；它们直接扫描文件系统，因此 CLI 生成的历史产物也会
+立即出现在列表中：
+
+| 接口 | 说明 |
+| --- | --- |
+| `GET /api/health` | 服务状态、版本与当前任务后端 |
+| `GET /api/documents` | 扫描 `upload/parsed/`，返回解析清单、抽取/索引状态与关联标书摘要 |
+| `GET /api/bids` | 扫描 `upload/bids/`，按生成时间倒序返回历史产物摘要 |
+| `GET /api/bids/{doc_id}` | 返回产物详情：评分项覆盖、章节映射、审查问题、待填写清单与修订记录 |
+| `GET /api/bids/{doc_id}/files/{filename}` | 预览或下载产物；`?download=1` 作为附件，附件名只允许 `bid.md`、`bid.docx`、`bid_review.md`、`bid_manifest.json` |
+
+`doc_id` 与文件名都经过白名单和路径校验，不能读取 `upload/bids/<doc_id>/`
+之外的文件。评分覆盖只表示“评分项是否已映射到章节”，**不是实际得分**；草稿
+仍需按 `bid_review.md` 人工核对后提交。
+
+CORS 仅允许 `localhost` / `127.0.0.1` 的任意端口与 Electron 的 `null` 源，便于
+Vite 开发服务器和 `file://` 桌面渲染进程直接访问本地 API。
+
 Windows 上 worker 请使用 `--pool=solo`；需要并发时在 POSIX 主机上运行 prefork
 worker，或在本机启动多个 solo worker（自行控制 CPU 与 API 配额）。硬/软超时由
 `CELERY_TASK_TIME_LIMIT`、`CELERY_SOFT_TIME_LIMIT` 控制；Windows 的 solo pool
@@ -277,14 +297,42 @@ uv run pytest
 测试覆盖页码分片、结构识别、抽取归一化/合并/grounding、单元构建、分块与页码映射、
 CLI 错误处理，以及 API 上传/写标校验、202 轮询、可选抽取/入库、内存任务表、
 Redis 任务状态与 TTL/文档锁、Celery 任务路由与生命周期、双后端切换和
-`POST /api/bids` 端到端流程；标书编写部分覆盖 profile 占位符、招标上下文与
-页码引用、固定大纲/评分矩阵、LangGraph 全流程、事实优先修订、Markdown/Word
-产物和 CLI。全部为离线测试，不访问外部 API 或真实 Redis。
+`POST /api/bids` 端到端流程；文档库与产物接口覆盖清单扫描、路径白名单与文件
+预览；标书编写部分覆盖 profile 占位符、招标上下文与页码引用、固定大纲/评分矩阵、
+LangGraph 全流程、事实优先修订、Markdown/Word 产物和 CLI。全部为离线测试，
+不访问外部 API 或真实 Redis。
 
-## 前端
+## 前端工作台
 
 ```bash
+# 终端 1：API（默认 127.0.0.1:8001；需 Redis + worker 时按上文启动）
+uv run python -m api
+
+# 终端 2：Vite 开发服务器（/api 代理到 8001）
 npm --prefix frontend run dev
+
+# 生产构建；类型检查由 tsc -b 完成
 npm --prefix frontend run build
+npm --prefix frontend run lint
+
+# Electron：dev 模式复用 5173 开发服务器；start 先构建再加载 dist
 npm --prefix frontend run electron:dev
+npm --prefix frontend run electron:start
 ```
+
+工作台固定为左侧步骤导航 + 右侧工作区，顶部显示后端服务状态：
+
+1. **上传解析**：拖拽或选择 PDF，设置解析器（auto/MinerU/PyMuPDF）、结构化
+   抽取与向量入库，实时展示队列阶段、进度日志和解析/抽取/入库摘要。
+2. **投标编写**：选择已完成抽取的文档；常用投标人字段用表单填写，复杂结构在
+   可折叠 JSON 编辑器中编辑，两种视图同步。可设置新增章节与自动修订上限，
+   完成后展示评分项/分值覆盖、章节映射、审查问题与修订记录。
+3. **文档库**：列出 `upload/parsed/` 下已有文档、抽取/索引状态和历史标书，可
+   直接发起编写或跳转到产物。
+4. **历史产物**：浏览 `upload/bids/` 下的历史结果，在线预览 Markdown、下载
+   Markdown/Word/清单，并在 Electron 中通过受限 IPC 在资源管理器中定位产物目录。
+
+Vite 的 `base` 固定为 `./`，构建产物可以直接由 Electron 以 `file://` 加载；
+浏览器开发时使用相对 `/api` 路径并由 Vite 代理，桌面构建则默认请求
+`http://127.0.0.1:8001`（可用 `VITE_API_BASE_URL` 覆盖）。Markdown 预览不启用
+原始 HTML，且会隐藏内部页码/分页注释。

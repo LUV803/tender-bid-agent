@@ -497,7 +497,15 @@ def build_review_markdown(
     else:
         lines.append("投标人资料未发现缺失字段。")
 
-    lines.extend(["", "## 5. 审查问题", ""])
+    lines.extend(
+        [
+            "",
+            "## 5. 审查问题",
+            "",
+            "> 以下为自动修订前的审查结果，修订记录见第 9 节；提交前请以最终正文和人工复核为准。",
+            "",
+        ]
+    )
     if issues:
         for severity, label in (("high", "高"), ("medium", "中"), ("low", "低")):
             grouped = [item for item in issues if item.get("severity") == severity]

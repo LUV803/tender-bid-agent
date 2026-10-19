@@ -500,7 +500,8 @@ def _make_snippet(
     width: int = 240,
     fallback: str = "",
 ) -> str:
-    visible = re.sub(r"\s+", " ", (raw_text or "").strip())
+    visible = PAGE_MARKER_RE.sub(" ", raw_text or "")
+    visible = re.sub(r"\s+", " ", visible.strip())
     if not visible:
         return fallback
     compact, offsets = _compact_offsets(visible)

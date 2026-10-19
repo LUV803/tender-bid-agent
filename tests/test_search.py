@@ -181,6 +181,7 @@ def test_price_score_query_cites_tables(settings) -> None:
     assert top["table_label"] == "表10"
     assert top["page_start"] == 2
     assert "50分" in top["snippet"]
+    assert "<!-- page" not in top["snippet"]
 
     labels = {
         item.get("table_label") for item in results if item.get("kind") == "table"

@@ -97,6 +97,62 @@ def test_blank_tender_templates_and_slash_thresholds_are_dropped() -> None:
     assert items[0]["thresholds"] == ["三级及以上"]
 
 
+def test_unscored_procedure_rows_are_not_evaluation_factors() -> None:
+    raw = {
+        "evaluation_factors": [
+            {"factor": "评标方法", "criteria": "按第三章规定评审"},
+            {"factor": "施工组织设计", "max_score": 30, "criteria": "暗标评审"},
+            {"name": "投标报价", "score": "50分"},
+        ]
+    }
+    factors = normalize_extraction(raw)["evaluation_factors"]
+    assert [factor["factor"] for factor in factors] == ["施工组织设计", "投标报价"]
+
+
+def test_bare_qualification_labels_are_dropped() -> None:
+    raw = {
+        "qualifications": [
+            {"requirement": "财务要求"},
+            {"requirement": "项目经理资格", "thresholds": []},
+            {"requirement": "财务要求", "thresholds": ["近3年均盈利"]},
+        ]
+    }
+    items = normalize_extraction(raw)["qualifications"]
+    assert [item["requirement"] for item in items] == ["财务要求"]
+    assert items[0]["thresholds"] == ["近3年均盈利"]
+
+
+def test_key_dates_require_a_usable_time() -> None:
+    raw = {
+        "key_dates": [
+            {"event": "投标截止时间", "time": "本章第4.2.1项规定"},
+            {"event": "开标时间", "time": ""},
+            {"event": "签订合同", "time": "接到本通知书后的   日内"},
+            {"event": "退还保证金", "time": "收到撤回通知之日起5日内"},
+            {"event": "开标", "time": "2023-11-14 13:30"},
+        ]
+    }
+    items = normalize_extraction(raw)["key_dates"]
+    assert [item["event"] for item in items] == ["退还保证金", "开标"]
+
+
+def test_numbered_bid_format_titles_merge_with_unnumbered() -> None:
+    raw = {
+        "bid_format_items": [
+            {"name": "投标函及投标函附录", "requirements": "加盖单位电子印章"},
+            {"title": "一、投标函及投标函附录", "requirements": "按第八章格式编写"},
+            {"title": "十、原件的扫描件"},
+        ]
+    }
+    items = normalize_extraction(raw)["bid_format"]["items"]
+    assert [item["title"] for item in items] == [
+        "投标函及投标函附录",
+        "十、原件的扫描件",
+    ]
+    assert "加盖单位电子印章" in items[0]["requirements"]
+    assert "按第八章格式编写" in items[0]["requirements"]
+
+
 def test_duplicate_qualifications_merge_thresholds() -> None:
     raw = {
         "qualification_items": [

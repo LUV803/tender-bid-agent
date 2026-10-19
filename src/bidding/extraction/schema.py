@@ -103,6 +103,19 @@ _METHOD_HINTS = (
 _BLANK_TEMPLATE_RE = re.compile(
     r"(?:近|于)?\s*[/／]\s*(?:年|月|日|项|个|标段|万元|元)"
 )
+_BARE_QUALIFICATION_RE = re.compile(
+    r"^(?:资质|财务|业绩|信誉|人员|其他|项目经理|技术负责人|企业主要负责人)"
+    r"(?:要求|资格|条件)$"
+)
+_KEY_DATE_PLACEHOLDER_RE = re.compile(
+    r"原文未提供|前附表规定|本章第|规定的方法|投标截止时间止"
+)
+_BLANK_DATE_RE = re.compile(r"(?:的|后|于)\s*(?:日|天|个工作日)内")
+_ITEM_NUMBER_PREFIX_RE = re.compile(
+    r"^(?:[一二三四五六七八九十百]+[、.．]|"
+    r"[（(][一二三四五六七八九十百]+[）)]|"
+    r"\d+[、.．])\s*"
+)
 
 
 def _is_placeholder(value: str) -> bool:
@@ -300,12 +313,19 @@ def _merge_qualifications(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [merged[key] for key in order]
 
 
+def _bid_title_key(title: str) -> str:
+    """Match "一、投标函" with an unnumbered "投标函" from another chapter."""
+    return normalize_ws(_ITEM_NUMBER_PREFIX_RE.sub("", title or ""))
+
+
 def _merge_bid_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     merged: dict[str, dict[str, Any]] = {}
     order: list[str] = []
     for item in items:
         title = item.get("title", "")
-        key = normalize_ws(title) or json.dumps(item, ensure_ascii=False, sort_keys=True)
+        key = _bid_title_key(title) or json.dumps(
+            item, ensure_ascii=False, sort_keys=True
+        )
         if key not in merged:
             merged[key] = dict(item)
             order.append(key)
@@ -328,10 +348,15 @@ def _normalize_factor(item: Any) -> dict[str, Any] | None:
     raw_score = item.get("max_score")
     if raw_score is None or raw_score == "":
         raw_score = item.get("score", item.get("分值"))
+    score = _as_number(raw_score)
+    if score is None:
+        # Procedure/cross-reference rows sometimes leak into the scoring list;
+        # a scored factor must carry a numeric maximum.
+        return None
     return {
         "category": _category(item.get("category"), "evaluation_factors", factor + criteria),
         "factor": factor,
-        "max_score": _as_number(raw_score),
+        "max_score": score,
         "criteria": criteria,
         "source_quote": _first(item, "source_quote", "quote", "原文", "evidence"),
     }
@@ -373,12 +398,25 @@ def _normalize_qualification(item: Any) -> dict[str, Any] | None:
         )
         if not _is_placeholder(text) and not _looks_like_blank_template(text)
     ]
+    if not thresholds and _BARE_QUALIFICATION_RE.match(requirement):
+        # "财务要求" / "项目经理资格" carry no condition on their own.
+        return None
     return {
         "category": _category(item.get("category"), "qualifications", requirement),
         "requirement": requirement,
         "thresholds": thresholds,
         "source_quote": _first(item, "source_quote", "quote", "原文", "evidence"),
     }
+
+
+def _is_unusable_key_date_time(value: str) -> bool:
+    text = (value or "").strip()
+    if not text or _is_placeholder(text):
+        return True
+    if _KEY_DATE_PLACEHOLDER_RE.search(text):
+        return True
+    # Blank form fields such as "接到本通知书后的   日内".
+    return bool(_BLANK_DATE_RE.search(text)) and not re.search(r"\d", text)
 
 
 def _normalize_key_date(item: Any) -> dict[str, Any] | None:
@@ -388,7 +426,7 @@ def _normalize_key_date(item: Any) -> dict[str, Any] | None:
         return None
     event = _first(item, "event", "name", "title", "事项")
     time = _first(item, "time", "date", "deadline", "时间")
-    if not event and not time:
+    if not event or _is_unusable_key_date_time(time):
         return None
     return {
         "event": event,

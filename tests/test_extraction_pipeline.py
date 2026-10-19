@@ -171,3 +171,21 @@ def test_split_for_bisect_returns_overlapping_halves() -> None:
     assert left != right
     assert len(left) < len(unit.text) and len(right) < len(unit.text)
     assert _split_for_bisect("太短") is None
+
+
+def test_split_for_bisect_prefers_page_boundary_near_midpoint() -> None:
+    text = (
+        "甲" * 1800
+        + "\n<!-- page: 2 -->\n"
+        + "乙" * 280
+        + "\n\nSENTINEL"
+        + "丙" * 1000
+    )
+    halves = _split_for_bisect(text)
+    assert halves is not None
+    left, right = halves
+    # The cut lands at the page marker before the nearby paragraph break, so
+    # the sentinel after that break stays out of the left half.
+    assert "<!-- page: 2 -->" in left
+    assert "SENTINEL" not in left
+    assert "SENTINEL" in right

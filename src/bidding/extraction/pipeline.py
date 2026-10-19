@@ -37,6 +37,7 @@ SCHEMA_VERSION = "1.0"
 PAGE_BLOCK_RE = re.compile(
     r"<!--\s*page:\s*(\d+)\s*-->([\s\S]*?)(?=<!--\s*page:\s*\d+\s*-->|$)"
 )
+PAGE_MARKER_RE = re.compile(r"<!--\s*page:\s*\d+\s*-->")
 Progress = Callable[[str], None] | None
 
 
@@ -268,14 +269,40 @@ def build_units(
     return units
 
 
+def _nearest_position(text: str, token: str, midpoint: int, radius: int) -> int:
+    """Return the occurrence of ``token`` closest to ``midpoint``, or -1."""
+    start = max(0, midpoint - radius)
+    end = min(len(text), midpoint + radius)
+    best = -1
+    position = text.find(token, start)
+    while position != -1 and position <= end:
+        if best < 0 or abs(position - midpoint) < abs(best - midpoint):
+            best = position
+        position = text.find(token, position + 1)
+    return best
+
+
+def _nearest_page_marker(text: str, midpoint: int, radius: int) -> int:
+    start = max(0, midpoint - radius)
+    end = min(len(text), midpoint + radius)
+    best = -1
+    for match in PAGE_MARKER_RE.finditer(text, start, end):
+        if best < 0 or abs(match.start() - midpoint) < abs(best - midpoint):
+            best = match.start()
+    return best
+
+
 def _split_for_bisect(text: str) -> tuple[str, str] | None:
     midpoint = len(text) // 2
-    cut = -1
-    for token in ("\n\n", "\n", "。", "；", "！", "？"):
-        position = text.rfind(token, max(0, midpoint - 1200), midpoint + 1200)
-        if position > 0:
-            cut = position + len(token)
-            break
+    # Page boundaries keep table rows intact; fall back to the closest
+    # paragraph or sentence break when no marker is near the midpoint.
+    cut = _nearest_page_marker(text, midpoint, 600)
+    if cut <= 0:
+        for token in ("\n\n", "\n", "。", "；", "！", "？"):
+            position = _nearest_position(text, token, midpoint, 1200)
+            if position > 0:
+                cut = position + len(token)
+                break
     if cut <= 0:
         cut = midpoint
     overlap = min(200, len(text) // 10)

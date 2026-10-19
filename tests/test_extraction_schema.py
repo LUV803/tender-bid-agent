@@ -7,6 +7,7 @@ from bidding.extraction.llm import parse_json_object
 from bidding.extraction.schema import (
     empty_extraction,
     ground_extraction,
+    infer_evaluation_method,
     merge_extractions,
     normalize_extraction,
 )
@@ -119,6 +120,51 @@ def test_bid_format_items_merge_by_title_and_keep_aliases() -> None:
     assert "副本四份" in items[0]["requirements"]
 
 
+def test_placeholder_scalars_are_dropped() -> None:
+    result = normalize_extraction(
+        {
+            "project_name": "（项目名称）",
+            "bid_section": "见投标人须知前附表",
+            "bid_opening_time": "年  月  日  时  分",
+            "evaluation_method": "未明确提供",
+            "bid_opening_place": "（开标记录表中未明确）",
+        }
+    )
+    for field in (
+        "project_name",
+        "bid_section",
+        "bid_opening_time",
+        "evaluation_method",
+        "bid_opening_place",
+    ):
+        assert result[field] == ""
+
+
+def test_merge_prefers_named_evaluation_method_over_cross_references() -> None:
+    base = normalize_extraction(
+        {"evaluation_method": "电子招标投标交易平台"}
+    )
+    generic = normalize_extraction(
+        {"evaluation_method": "按照第三章“评标办法”规定的方法评审"}
+    )
+    merged = merge_extractions(base, generic)
+    assert merged["evaluation_method"] == "按照第三章“评标办法”规定的方法评审"
+
+    named = normalize_extraction({"evaluation_method": "综合评估法"})
+    merged = merge_extractions(merged, named)
+    assert merged["evaluation_method"] == "综合评估法"
+
+
+def test_infer_evaluation_method_from_toc_title() -> None:
+    titles = ["第一卷", "第三章 评标办法（综合评估法）"]
+    assert infer_evaluation_method(titles, "见投标人须知前附表") == "综合评估法"
+    assert (
+        infer_evaluation_method(titles, "经评审的最低投标价法")
+        == "经评审的最低投标价法"
+    )
+    assert infer_evaluation_method(["第一章 招标公告"], "") == ""
+
+
 def test_merge_extractions_keeps_first_scalar_and_merges_lists() -> None:
     first = normalize_extraction(
         {
@@ -170,11 +216,20 @@ def test_grounding_checks_each_line_of_combined_quotes() -> None:
             "source_quote": "项目经理须具备一级建造师资格。",
         },
     ]
+    extraction["preliminary_review"] = [
+        {
+            "stage": "形式评审",
+            "item": "投标人名称",
+            "criteria": "与营业执照一致",
+            "source_quote": "投标人名称应与营业执照一致。",
+        }
+    ]
     ungrounded = ground_extraction(extraction, markdown)
     fields = {item["field"] for item in ungrounded}
     assert "project_name" in fields
     assert "qualifications[0].source_quote" not in fields
     assert "qualifications[1].source_quote" in fields
+    assert "preliminary_review[0].source_quote" in fields
 
 
 def test_parse_json_object_accepts_fences_and_chatty_prefixes() -> None:

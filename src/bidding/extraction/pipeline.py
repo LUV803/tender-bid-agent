@@ -28,6 +28,7 @@ from .prompts import PROMPT_VERSION, build_user_prompt, route_focus
 from .schema import (
     empty_extraction,
     ground_extraction,
+    infer_evaluation_method,
     merge_extractions,
     normalize_extraction,
 )
@@ -549,6 +550,10 @@ def run_extract(
     if failed_units and processed == 0:
         raise ExtractError("所有抽取单元均失败：" + failed_units[0]["error"])
 
+    result["evaluation_method"] = infer_evaluation_method(
+        [entry.title for entry in entries],
+        result.get("evaluation_method", ""),
+    )
     ungrounded = ground_extraction(result, markdown)
     elapsed = round(time.monotonic() - started, 2)
     partial = partial or bool(failed_units)

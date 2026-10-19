@@ -82,6 +82,51 @@ _CATEGORY_HINTS = {
 
 _NUMBER_RE = re.compile(r"-?\d+(?:\.\d+)?")
 
+# Values that only point at another document location or repeat a blank form.
+_PLACEHOLDER_RE = re.compile(
+    r"^(?:"
+    r"见.*(?:前附表|招标文件|本章|规定)|"
+    r"未明确.*|未知|待定|无|/|n/?a|"
+    r"[（(]?项目名称[）)]?|[（(]?标段名称[）)]?|"
+    r"年\s*月\s*日.*|"
+    r"[（(]?.*未明确.*[）)]?"
+    r")$",
+    re.IGNORECASE,
+)
+_METHOD_HINTS = (
+    "综合评估法",
+    "经评审的最低投标价法",
+    "最低评标价法",
+    "综合评分法",
+    "合理低价法",
+)
+
+
+def _is_placeholder(value: str) -> bool:
+    text = (value or "").strip()
+    return not text or bool(_PLACEHOLDER_RE.match(text))
+
+
+def _method_rank(value: str) -> int:
+    """Prefer a named evaluation method over cross-references."""
+    text = value or ""
+    if any(hint in text for hint in _METHOD_HINTS):
+        return 3
+    if "评标办法" in text or "规定的方法" in text:
+        return 2
+    return 1
+
+
+def infer_evaluation_method(titles: list[str], current: str) -> str:
+    """Fall back to a named method in the TOC when the text only cross-refers."""
+    if any(hint in (current or "") for hint in _METHOD_HINTS):
+        return current
+    for title in titles:
+        for hint in _METHOD_HINTS:
+            if hint in (title or ""):
+                return hint
+    return current
+
 
 def _as_list(value: Any) -> list[Any]:
     if value is None:
@@ -431,7 +476,8 @@ def normalize_extraction(raw: Any) -> dict[str, Any]:
 
     result = empty_extraction()
     for field in SCALAR_FIELDS:
-        result[field] = _as_str(flattened.get(field))
+        value = _as_str(flattened.get(field))
+        result[field] = "" if _is_placeholder(value) else value
 
     for field in (
         "evaluation_factors",
@@ -491,7 +537,12 @@ def merge_extractions(base: dict[str, Any], extra: dict[str, Any]) -> dict[str, 
     """Merge normalized results: scalars keep first value; lists de-duplicate."""
     for field in SCALAR_FIELDS:
         value = extra.get(field)
-        if value and not base.get(field):
+        if not value or _is_placeholder(value):
+            continue
+        current = base.get(field) or ""
+        if not current or _is_placeholder(current):
+            base[field] = value
+        elif field == "evaluation_method" and _method_rank(value) > _method_rank(current):
             base[field] = value
 
     for field in (
@@ -558,10 +609,13 @@ def ground_extraction(extraction: dict[str, Any], markdown: str) -> list[dict[st
     for field in (
         "project_name",
         "tender_number",
+        "project_scale",
+        "bid_section",
         "budget_amount_text",
         "bid_deadline",
         "bid_opening_time",
         "bid_opening_place",
+        "evaluation_method",
     ):
         add(field, extraction.get(field, ""))
 
@@ -569,6 +623,13 @@ def ground_extraction(extraction: dict[str, Any], markdown: str) -> list[dict[st
         add(
             f"evaluation_factors[{index}].source_quote",
             item.get("factor", ""),
+            item.get("source_quote", ""),
+        )
+
+    for index, item in enumerate(extraction.get("preliminary_review") or []):
+        add(
+            f"preliminary_review[{index}].source_quote",
+            item.get("item", ""),
             item.get("source_quote", ""),
         )
 

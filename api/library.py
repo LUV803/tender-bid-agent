@@ -9,13 +9,17 @@ by the CLI show up in the desktop app immediately.
 from __future__ import annotations
 
 import json
+import logging
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
+from bidding import storage
 from bidding.config import Settings
 from bidding.parsing.structure import sanitize_doc_id
+
+logger = logging.getLogger(__name__)
 
 BID_FILENAMES: dict[str, str] = {
     "markdown": "bid.md",
@@ -100,23 +104,69 @@ def media_type_for(filename: str) -> str:
     return ARTIFACT_MEDIA_TYPES.get(filename, "application/octet-stream")
 
 
-def _artifact_entries(doc_id: str, bid_dir: Path) -> list[dict[str, Any]]:
+def _remote_json(
+    settings: Settings, key: str
+) -> dict[str, Any] | None:
+    if not storage.active(settings):
+        return None
+    try:
+        return storage.read_json_object(settings, key)
+    except (storage.StorageError, ValueError) as exc:
+        logger.warning("读取 MinIO 对象失败（%s）：%s", key, exc)
+        return None
+
+
+def _load_bid_manifest(
+    settings: Settings, doc_id: str, bid_dir: Path | None
+) -> dict[str, Any] | None:
+    if bid_dir is not None:
+        manifest = _read_json(bid_dir / "bid_manifest.json")
+        if manifest is not None:
+            return manifest
+    try:
+        key = storage.bid_key(doc_id, "bid_manifest.json")
+    except ValueError:
+        return None
+    return _remote_json(settings, key)
+
+
+def _bid_file_sizes(
+    settings: Settings, doc_id: str, bid_dir: Path | None
+) -> dict[str, int]:
+    sizes: dict[str, int] = {}
+    if bid_dir is not None:
+        for filename in ARTIFACT_NAMES:
+            path = bid_dir / filename
+            try:
+                if path.is_file():
+                    sizes[filename] = path.stat().st_size
+            except OSError:
+                continue
+    if storage.active(settings) and not ARTIFACT_NAMES.issubset(sizes):
+        try:
+            remote = storage.remote_bid_files(settings, doc_id)
+        except (storage.StorageError, ValueError) as exc:
+            logger.warning("列出 MinIO 投标产物失败（%s）：%s", doc_id, exc)
+        else:
+            for filename, size in remote.items():
+                sizes.setdefault(filename, size)
+    return sizes
+
+
+def _artifact_entries(
+    doc_id: str, sizes: dict[str, int]
+) -> list[dict[str, Any]]:
     encoded = quote(doc_id, safe="")
     entries: list[dict[str, Any]] = []
     for key, filename in BID_FILENAMES.items():
-        path = bid_dir / filename
-        if not path.is_file():
-            continue
-        try:
-            size = path.stat().st_size
-        except OSError:
+        if filename not in sizes:
             continue
         entries.append(
             {
                 "key": key,
                 "name": filename,
                 "label": ARTIFACT_LABELS[key],
-                "size": size,
+                "size": sizes[filename],
                 "previewable": filename.endswith(".md"),
                 "content_url": f"/api/bids/{encoded}/files/{filename}",
                 "download_url": f"/api/bids/{encoded}/files/{filename}?download=1",
@@ -128,39 +178,48 @@ def _artifact_entries(doc_id: str, bid_dir: Path) -> list[dict[str, Any]]:
 def bid_summary(settings: Settings, doc_id: str) -> dict[str, Any] | None:
     """Compact manifest-backed summary for one generated bid."""
     bid_dir = _safe_bid_dir(settings, doc_id)
-    if bid_dir is None:
-        return None
-    manifest = _read_json(bid_dir / "bid_manifest.json")
+    manifest = _load_bid_manifest(settings, doc_id, bid_dir)
     if manifest is None:
         return None
     project = _mapping(manifest.get("project"))
     bidder = _mapping(manifest.get("bidder"))
     stats = _mapping(manifest.get("stats"))
     settings_data = _mapping(manifest.get("settings"))
-    artifacts = _artifact_entries(doc_id, bid_dir)
+    artifacts = _artifact_entries(
+        doc_id, _bid_file_sizes(settings, doc_id, bid_dir)
+    )
     return {
         "doc_id": doc_id,
         "project_name": str(project.get("project_name") or ""),
         "bidder": str(bidder.get("company_name") or ""),
-        "created_at": str(manifest.get("created_at") or _timestamp(bid_dir)),
+        "created_at": str(
+            manifest.get("created_at")
+            or (_timestamp(bid_dir) if bid_dir is not None else "")
+        ),
         "elapsed_seconds": _number(manifest.get("elapsed_seconds")),
         "stats": stats,
         "settings": settings_data,
         "artifacts": artifacts,
-        "folder": str(bid_dir),
+        "folder": str(settings.bids_dir / doc_id),
         "warnings": [str(item) for item in _list(manifest.get("warnings"))],
     }
 
 
 def list_bid_history(settings: Settings) -> list[dict[str, Any]]:
     root = settings.bids_dir
-    if not root.is_dir():
-        return []
+    doc_ids: set[str] = set()
+    if root.is_dir():
+        for child in root.iterdir():
+            if child.is_dir() and sanitize_doc_id(child.name) == child.name:
+                doc_ids.add(child.name)
+    if storage.active(settings):
+        try:
+            doc_ids.update(storage.remote_document_ids(settings, kind="bids"))
+        except (storage.StorageError, ValueError) as exc:
+            logger.warning("列出 MinIO 投标历史失败：%s", exc)
     items: list[dict[str, Any]] = []
-    for child in root.iterdir():
-        if not child.is_dir():
-            continue
-        summary = bid_summary(settings, child.name)
+    for doc_id in sorted(doc_ids):
+        summary = bid_summary(settings, doc_id)
         if summary is not None:
             items.append(summary)
     items.sort(key=lambda item: item.get("created_at") or "", reverse=True)
@@ -171,22 +230,70 @@ def _extraction_meta(extraction: dict[str, Any] | None) -> dict[str, Any]:
     return _mapping((extraction or {}).get("extraction_meta"))
 
 
+def _remote_parsed_files(
+    settings: Settings, doc_id: str
+) -> set[str]:
+    if not storage.active(settings):
+        return set()
+    try:
+        return storage.remote_parsed_files(settings, doc_id)
+    except (storage.StorageError, ValueError) as exc:
+        logger.warning("列出 MinIO 解析产物失败（%s）：%s", doc_id, exc)
+        return set()
+
+
 def list_documents(settings: Settings) -> list[dict[str, Any]]:
-    """List every directory under ``upload/parsed`` with a parse manifest."""
+    """List local and remote parsed documents with a parse manifest.
+
+    Local files win; MinIO fills in documents that were produced on another
+    machine or removed from the local cache.
+    """
     root = settings.parsed_dir
-    if not root.is_dir():
-        return []
+    doc_ids: set[str] = set()
+    if root.is_dir():
+        for child in root.iterdir():
+            if child.is_dir() and sanitize_doc_id(child.name) == child.name:
+                doc_ids.add(child.name)
+    if storage.active(settings):
+        try:
+            doc_ids.update(
+                storage.remote_document_ids(settings, kind="parsed")
+            )
+        except (storage.StorageError, ValueError) as exc:
+            logger.warning("列出 MinIO 解析文档失败：%s", exc)
+
     items: list[dict[str, Any]] = []
-    for child in root.iterdir():
-        if not child.is_dir() or not (child / "manifest.json").is_file():
-            continue
-        doc_id = child.name
-        if sanitize_doc_id(doc_id) != doc_id:
-            continue
-        manifest = _read_json(child / "manifest.json")
+    for doc_id in sorted(doc_ids):
+        child = root / doc_id
+        manifest = (
+            _read_json(child / "manifest.json")
+            if (child / "manifest.json").is_file()
+            else None
+        )
+        if manifest is None:
+            manifest = _remote_json(
+                settings, storage.parsed_key(doc_id, "manifest.json")
+            )
         if manifest is None:
             continue
-        extraction = _read_json(child / "extraction.json")
+
+        extraction = (
+            _read_json(child / "extraction.json")
+            if (child / "extraction.json").is_file()
+            else None
+        )
+        has_index = (child / "index_manifest.json").is_file()
+        if storage.active(settings) and (
+            extraction is None or not has_index
+        ):
+            remote_files = _remote_parsed_files(settings, doc_id)
+            if extraction is None and "extraction.json" in remote_files:
+                extraction = _remote_json(
+                    settings, storage.parsed_key(doc_id, "extraction.json")
+                )
+            if not has_index and "index_manifest.json" in remote_files:
+                has_index = True
+
         meta = _extraction_meta(extraction)
         bid = bid_summary(settings, doc_id)
         evaluation_factors = _list((extraction or {}).get("evaluation_factors"))
@@ -203,17 +310,20 @@ def list_documents(settings: Settings) -> list[dict[str, Any]]:
                 "doc_type": str(manifest.get("doc_type") or ""),
                 "pages": int(manifest.get("pages") or 0),
                 "parser": str(manifest.get("parser") or ""),
-                "parsed_at": str(manifest.get("parsed_at") or _timestamp(child)),
+                "parsed_at": str(
+                    manifest.get("parsed_at")
+                    or (_timestamp(child) if child.is_dir() else "")
+                ),
                 "section_count": len(_list(manifest.get("sections"))),
                 "toc_count": len(_list(manifest.get("toc"))),
                 "warning_count": len(_list(manifest.get("warnings"))),
-                "has_extraction": (child / "extraction.json").is_file(),
+                "has_extraction": extraction is not None,
                 "extraction_partial": bool(meta.get("partial")),
                 "ungrounded_count": int(
                     meta.get("ungrounded_count") or len(ungrounded)
                 ),
                 "evaluation_factor_count": len(evaluation_factors),
-                "has_index": (child / "index_manifest.json").is_file(),
+                "has_index": has_index,
                 "bid": bid,
             }
         )
@@ -321,11 +431,17 @@ def _section_report(
 
 def bid_detail(settings: Settings, doc_id: str) -> dict[str, Any] | None:
     """Summary plus scoring coverage and per-section review data."""
+    bid_dir = _safe_bid_dir(settings, doc_id)
+    if (
+        bid_dir is None
+        or not (bid_dir / "bid_manifest.json").is_file()
+    ) and storage.active(settings):
+        storage.hydrate_bid(doc_id, settings)
+        bid_dir = _safe_bid_dir(settings, doc_id)
     summary = bid_summary(settings, doc_id)
     if summary is None:
         return None
-    bid_dir = _safe_bid_dir(settings, doc_id)
-    manifest = _read_json(bid_dir / "bid_manifest.json") if bid_dir else None
+    manifest = _load_bid_manifest(settings, doc_id, bid_dir)
     if manifest is None:
         return None
     review = _mapping(manifest.get("review"))

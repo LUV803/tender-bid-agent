@@ -10,6 +10,7 @@ from typing import Any
 
 from ..config import Settings, get_settings
 from ..models import ParseResult, Section, TocEntry, now_iso
+from ..storage import mirror_parse_artifacts
 from .errors import MineruError, ParseError
 from .local import parse_local
 from .mineru import parse_cloud
@@ -267,6 +268,10 @@ def parse_document(
         try:
             cached = load_manifest(doc_id, settings)
             if _cache_matches(cached, parser.lower(), digest):
+                # Backfill the durable copy if MinIO was unavailable earlier.
+                # Do not delete remote extraction/index objects that are not
+                # part of a local parse-only cache.
+                mirror_parse_artifacts(doc_id, settings, clean=False)
                 return cached
         except ParseError:
             pass
@@ -340,4 +345,5 @@ def parse_document(
         "parser_meta": parser_meta,
     }
     _write_json(mpath, manifest)
+    mirror_parse_artifacts(doc_id, settings)
     return manifest

@@ -10,7 +10,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 `bidding` 项目用于招标文件解析、结构化抽取、检索索引与多 Agent 标书编写。技术栈如下：
 
-- **后端**：Python 3.12 + FastAPI/uvicorn；SQLAlchemy 2.0 + asyncpg；Celery + Redis；ChromaDB 向量库；LangGraph；OpenAI SDK / zai-sdk；python-docx / PyMuPDF。
+- **后端**：Python 3.12 + FastAPI/uvicorn；SQLAlchemy 2.0 + asyncpg；Celery + Redis；ChromaDB 向量库；MinIO 对象存储（可选）；LangGraph；OpenAI SDK / zai-sdk；python-docx / PyMuPDF。
 - **前端**：React 19 + TypeScript + Vite 8 + Tailwind CSS 4；Electron 44 桌面外壳。
 - **包管理**：Python 使用 uv（`pyproject.toml` + `uv.lock`）；前端使用 npm（`frontend/package.json` + `package-lock.json`）。
 
@@ -25,6 +25,7 @@ src/bidding/parsing/          PDF 解析：结构还原、PyMuPDF、MinerU、产
 src/bidding/extraction/       结构化抽取：章节单元、LLM 容错、归一化/合并/grounding
 src/bidding/indexing/         检索索引：分块、智谱 embedding、Chroma 读写与自检
 src/bidding/writing/          多 Agent 标书编写：profile、招标上下文、检索、大纲、LangGraph、渲染与流水线
+src/bidding/storage.py        MinIO 对象存储：产物镜像、按需恢复、远端清单与连通性检查
 src/cli.py                    `python -m src.cli` 兼容入口（委托 bidding.cli）
 bidder_profile.example.json   投标人资料模板（留空字段生成【待填写】占位符）
 src/bidding/job_pipeline.py   解析 → 抽取 → 入库与写标的共享执行函数
@@ -71,6 +72,9 @@ uv run python -m bidding ingest <doc_id|pdf>            # 分块、嵌入并写�
 uv run python -m bidding inspect <doc_id> --query "评标办法"  # 检索测试
 uv run python -m bidding write <doc_id>                 # 多 Agent 生成投标文件
 uv run python -m src.cli write <doc_id>                 # 等价兼容入口
+uv run python -m bidding storage status                 # MinIO 配置与连通性
+uv run python -m bidding storage sync [doc_id]          # 本地产物补传到 MinIO
+uv run python -m bidding storage restore <doc_id>       # 从 MinIO 恢复到 upload/
 ```
 
 解析产物在 `upload/parsed/<doc_id>/`：`content.md` 为带页码注释的权威全文，`manifest.json` 为摘要（不含全文），`raw/sections.json` 保存章节正文缓存；图片在 `upload/images/<doc_id>/`。`auto` 模式优先 MinerU，未配置 `MINERU_API_KEY` 时按设计跳过云端并使用 PyMuPDF 本地解析，降级原因会写入 manifest。
@@ -99,7 +103,7 @@ uv run celery -A bidding.celery_app call bidding.ping
 
 `POST /api/bids` 接受 JSON `{"doc_id","profile","max_sections","max_revisions"}`：`profile` 是对象（≤2 MB，字段同 `bidder_profile.json`），无需文件上传。要求该 `doc_id` 已有解析与抽取产物，否则 404/409。API 把 profile 写到 `upload/tmp/<job_id>/bidder_profile.json` 并投递 `bidding.write_bid`；返回同样的 202/`job_id`/`status_url`，轮询同一任务接口，`kind=bid`、`stage=write`、`result.bid` 为摘要。`max_sections` 0–3（默认 0），`max_revisions` 0–10（默认 2）；写标与解析任务共用同一 `doc_id` 锁。
 
-只读工作台接口：`GET /api/health` 返回服务与任务后端；`GET /api/documents` 扫描 `upload/parsed/`（含关联标书摘要）；`GET /api/bids` 扫描 `upload/bids/`；`GET /api/bids/{doc_id}` 返回评分项覆盖、章节映射、审查问题与待填写清单；`GET /api/bids/{doc_id}/files/{filename}?download=` 预览/下载四个白名单产物。`api/library.py` 负责路径校验，`doc_id` 必须是安全目录名，文件名仅限 `bid.md`、`bid.docx`、`bid_review.md`、`bid_manifest.json`。CORS 仅允许 localhost/127.0.0.1 任意端口与 Electron `null` 源。覆盖报告是评分项到章节的映射，不代表实际得分。
+只读工作台接口：`GET /api/health` 返回服务、任务后端与存储模式（`minio`/`local`）；`GET /api/documents` 扫描 `upload/parsed/` 并合并 MinIO 远端文档（含关联标书摘要）；`GET /api/bids` 扫描 `upload/bids/`；`GET /api/bids/{doc_id}` 返回评分项覆盖、章节映射、审查问题与待填写清单；`GET /api/bids/{doc_id}/files/{filename}?download=` 预览/下载四个白名单产物。`api/library.py` 负责路径校验，`doc_id` 必须是安全目录名，文件名仅限 `bid.md`、`bid.docx`、`bid_review.md`、`bid_manifest.json`。CORS 仅允许 localhost/127.0.0.1 任意端口与 Electron `null` 源。覆盖报告是评分项到章节的映射，不代表实际得分。
 
 默认 `TASK_BACKEND=celery`：API 把上传/临时 profile 保存到 `upload/tmp/<job_id>/`，在 Redis 创建任务记录后按 `kind` 投递 Celery；worker 调用共享的 `job_pipeline.execute_pipeline` 或 `execute_bid_job`，状态、进度和阶段结果写回 Redis（`bidding:job:*`），Celery 结果后端只保存很小的任务返回值。API 重启不会丢失任务记录或中断 worker，记录在 `API_JOB_TTL_SECONDS` 后过期；API 与 worker 必须共享 `upload/` 文件系统。同一 `doc_id` 由 Redis 原子锁互斥（重复上传 409）；Redis/broker 不可用时提交与轮询返回 503。Windows 只能使用 `--pool=solo`；状态在 Redis，因此 `uvicorn --workers N` 可以正常轮询。
 
@@ -137,12 +141,16 @@ uv run celery -A bidding.celery_app call bidding.ping
 
 # ChromaDB（http://localhost:8000，仅入库/检索时需要）
 uv run chroma run --path ./chroma_db
+
+# MinIO（可选；S3 API 默认 127.0.0.1:9005，网页控制台 9000）
+D:\minio\bin\start.bat
 ```
 
 - FastAPI/uvicorn 默认端口也是 8000，启动后端时使用 `--port 8001`（或为 Chroma 指定其他端口），避免冲突。
 - Redis 版本需支持 RESP3（当前为 8.10.2）；redis-py 8.x 默认发送 `HELLO 3`，Redis 5 等旧版本会连接失败。
 - Redis 同时承载任务状态（`REDIS_URL`，db 0）和 Celery broker（`CELERY_BROKER_URL`，db 0）；结果后端在 db 1。键前缀 `bidding:` 避免冲突。
-- Windows 系统代理会影响 Python 对 localhost 的 HTTP 请求。`.env` 已配置 `NO_PROXY=localhost,127.0.0.1`；运行 Chroma 客户端前需确保该变量已加载，否则请求可能返回 502。
+- MinIO 由 `MINIO_ENABLED` 开关；连接参数为 `MINIO_ENDPOINT`（S3 API，默认 `127.0.0.1:9005`）、`MINIO_ACCESS_KEY`、`MINIO_SECRET_KEY`、`MINIO_BUCKET`（默认 `bidding`）与 `MINIO_SECURE`。`MINIO_ENDPOINT` 不是网页控制台端口 9000。
+- Windows 系统代理会影响 Python 对 localhost 的 HTTP 请求。`.env` 已配置 `NO_PROXY=localhost,127.0.0.1`；运行 Chroma/MinIO 客户端前需确保该变量已加载，否则请求可能返回 502。
 
 ## 环境要求与约定
 
@@ -154,5 +162,6 @@ uv run chroma run --path ./chroma_db
 - API 任务后端由 `TASK_BACKEND` 选择：`celery`（默认，需 Redis + worker）或 `memory`（单进程调试）。Celery broker/结果后端与超时由 `CELERY_*` 配置；运行 worker 前先加载 `.env`（`uv run` 会自动读取 `config.py` 的 `load_dotenv`）。
 - 聊天模型由 `LLM_PROVIDER` 选择 `deepseek` 或 `zhipu`。DeepSeek key 不可用时可切换为 `LLM_PROVIDER=zhipu` + `ZHIPU_CHAT_MODEL=glm-4-plus`，无需改代码；嵌入固定走智谱 `embedding-3`。
 - 标书编写的投标人资料来自 CLI 的 `upload/bidder_profile.json`（模板 `bidder_profile.example.json`）或 `POST /api/bids` 请求体中的 `profile`。`upload/` 整体被 git 忽略；不要编造投标人事实，缺失字段必须保留【待填写】占位符；临时 profile 文件结束后由 worker 删除。
+- MinIO 采用“本地缓存 + 远端镜像”：`upload/` 仍是所有流水线的读写目录；解析、抽取、入库、写标完成后尽力上传对应产物（失败仅记录警告，不中断任务），本地缺失时从 bucket 恢复。对象前缀为 `documents/<doc_id>/{source,parsed,images,bids}/`。`GET /api/documents`、`GET /api/bids` 合并本地与远端记录，`POST /api/bids` 与产物下载会按需恢复；`GET /api/health.storage` 为 `minio` 或 `local`。测试通过 `tests/conftest.py` 强制关闭 MinIO，并使用内存 Fake 客户端。
 - `write` 有 CLI 与 HTTP/Celery 两个入口，共用同一流水线；运行前需完成解析与抽取，且 LLM key 可用。
 - 修改功能后运行相关检查（`uv run pytest`、`npm --prefix frontend run build`），并按「固定任务」创建提交。

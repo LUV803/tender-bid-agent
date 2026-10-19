@@ -8,7 +8,7 @@
 
 - 后端：Python 3.12、uv、FastAPI、Celery + Redis、PyMuPDF、MinerU 云解析、
   OpenAI SDK（DeepSeek / 智谱）、zai-sdk（embedding-3）、ChromaDB、LangGraph、
-  python-docx。
+  python-docx、MinIO 对象存储（可选）。
 - 规划中：SQLAlchemy + asyncpg 持久化。
 - 前端：React 19、TypeScript、Vite 8、Tailwind CSS 4、Electron 44（已有脚手架）。
 
@@ -26,6 +26,9 @@ uv run celery -A bidding.celery_app worker --loglevel=info --pool=solo --queues=
 
 # 仅在需要入库/检索时启动 Chroma
 uv run chroma run --path ./chroma_db
+
+# 可选：MinIO 对象存储（先在 .env 设置 MINIO_* 并启用）
+D:\minio\bin\start.bat
 ```
 
 Windows 上请保留 `.env` 中的 `NO_PROXY=localhost,127.0.0.1`，否则系统代理可能
@@ -211,12 +214,12 @@ curl -X POST "http://127.0.0.1:8001/api/bids" \
 
 ### 文档库、历史产物与文件预览
 
-前端工作台使用以下只读接口；它们直接扫描文件系统，因此 CLI 生成的历史产物也会
-立即出现在列表中：
+前端工作台使用以下只读接口；它们扫描本地文件系统，并在启用 MinIO 时合并远端
+清单，因此 CLI 生成的历史产物也会立即出现在列表中：
 
 | 接口 | 说明 |
 | --- | --- |
-| `GET /api/health` | 服务状态、版本与当前任务后端 |
+| `GET /api/health` | 服务状态、版本、任务后端与存储模式（`minio` / `local`） |
 | `GET /api/documents` | 扫描 `upload/parsed/`，返回解析清单、抽取/索引状态与关联标书摘要 |
 | `GET /api/bids` | 扫描 `upload/bids/`，按生成时间倒序返回历史产物摘要 |
 | `GET /api/bids/{doc_id}` | 返回产物详情：评分项覆盖、章节映射、审查问题、待填写清单与修订记录 |
@@ -246,6 +249,50 @@ $env:TASK_BACKEND="memory"; uv run python -m api
 
 memory 模式下任务表随 API 进程重启丢失，必须以单进程运行；并发数与容量由
 `API_JOB_WORKERS`、`API_MAX_JOBS` 控制，`API_JOB_TTL_SECONDS` 控制记录过期。
+
+## MinIO 对象存储（可选）
+
+本地 `upload/` 仍是流水线的工作缓存；启用 MinIO 后，每个阶段完成后都会把产物
+镜像到 bucket，并在本地文件缺失时按需恢复。MinIO 不可用或未配置不会中断解析、
+抽取、入库和写标，只会记录警告；`bidding doctor` 与 `bidding storage status`
+会显示连接状态。
+
+```dotenv
+MINIO_ENABLED=true
+MINIO_ENDPOINT=127.0.0.1:9005   # S3 API 端口，不是网页控制台的 9000
+MINIO_ACCESS_KEY=...
+MINIO_SECRET_KEY=...
+MINIO_BUCKET=bidding
+MINIO_SECURE=false
+```
+
+对象布局（每个文档一个前缀）：
+
+| 前缀 | 内容 |
+| --- | --- |
+| `documents/<doc_id>/source/` | 原始 PDF |
+| `documents/<doc_id>/parsed/` | `content.md`、`manifest.json`、`raw/sections.json`、`extraction.json`、`extraction_parts/`、`index_manifest.json` |
+| `documents/<doc_id>/images/` | 解析出的图片 |
+| `documents/<doc_id>/bids/` | `bid.md`、`bid.docx`、`bid_review.md`、`bid_manifest.json` |
+
+```bash
+# 检查配置、bucket 连通性（doctor 同时检查 PyMuPDF/Chroma/Redis）
+uv run python -m bidding doctor
+uv run python -m bidding storage status
+
+# 将本地历史产物全量补传到 MinIO（也可只同步一个 doc_id）
+uv run python -m bidding storage sync
+uv run python -m bidding storage sync <doc_id>
+
+# 从 MinIO 恢复到 upload/（parse、图片、源 PDF 与投标产物）
+uv run python -m bidding storage restore <doc_id>
+```
+
+HTTP 工作台会自动使用 MinIO：`GET /api/documents` 与 `GET /api/bids` 合并本地
+和远端记录；`POST /api/bids` 在本地缺少解析/抽取文件时会先恢复；预览/下载产物
+时若本地没有对应文件，会先从 MinIO 取回再返回。`GET /api/health` 的 `storage`
+字段显示 `minio` 或 `local`。API 与 worker 使用同一 bucket；即使不共享 `upload/`
+文件系统，解析完成后的阶段产物也可以从对象存储恢复。
 
 ## 解析策略
 
@@ -299,8 +346,9 @@ CLI 错误处理，以及 API 上传/写标校验、202 轮询、可选抽取/�
 Redis 任务状态与 TTL/文档锁、Celery 任务路由与生命周期、双后端切换和
 `POST /api/bids` 端到端流程；文档库与产物接口覆盖清单扫描、路径白名单与文件
 预览；标书编写部分覆盖 profile 占位符、招标上下文与页码引用、固定大纲/评分矩阵、
-LangGraph 全流程、事实优先修订、Markdown/Word 产物和 CLI。全部为离线测试，
-不访问外部 API 或真实 Redis。
+LangGraph 全流程、事实优先修订、Markdown/Word 产物和 CLI。MinIO 镜像、恢复与
+API 远端回退使用内存 Fake 客户端覆盖。全部为离线测试，不访问外部 API、真实
+Redis 或真实 MinIO。
 
 ## 前端工作台
 

@@ -58,6 +58,17 @@ def _env_path(name: str, default: str) -> Path:
     return path.resolve()
 
 
+def _env_endpoint(name: str, default: str) -> str:
+    """MinIO expects ``host:port``; accept an http(s) URL in ``.env`` too."""
+    value = _env_str(name, default).strip()
+    lowered = value.lower()
+    if lowered.startswith("http://"):
+        value = value[7:]
+    elif lowered.startswith("https://"):
+        value = value[8:]
+    return value.rstrip("/")
+
+
 @dataclass(frozen=True, slots=True)
 class Settings:
     project_root: Path
@@ -103,6 +114,13 @@ class Settings:
     chroma_port: int
     chroma_dir: Path
     redis_url: str
+
+    minio_enabled: bool
+    minio_endpoint: str
+    minio_access_key: str
+    minio_secret_key: str
+    minio_bucket: str
+    minio_secure: bool
 
     mineru_mode: str
     mineru_api_key: str
@@ -161,6 +179,15 @@ class Settings:
     @property
     def mineru_configured(self) -> bool:
         return bool(self.mineru_api_key)
+
+    @property
+    def minio_configured(self) -> bool:
+        return bool(
+            self.minio_endpoint
+            and self.minio_bucket
+            and self.minio_access_key
+            and self.minio_secret_key
+        )
 
     def ensure_directories(self) -> None:
         for directory in (
@@ -226,6 +253,12 @@ def get_settings() -> Settings:
         chroma_port=_env_int("CHROMA_PORT", 8000),
         chroma_dir=_env_path("CHROMA_DIR", "chroma_db"),
         redis_url=_env_str("REDIS_URL", "redis://localhost:6379/0"),
+        minio_enabled=_env_bool("MINIO_ENABLED", False),
+        minio_endpoint=_env_endpoint("MINIO_ENDPOINT", "127.0.0.1:9005"),
+        minio_access_key=_env_str("MINIO_ACCESS_KEY"),
+        minio_secret_key=_env_str("MINIO_SECRET_KEY"),
+        minio_bucket=_env_str("MINIO_BUCKET", "bidding"),
+        minio_secure=_env_bool("MINIO_SECURE", False),
         mineru_mode=_env_str("MINERU_MODE", "cloud").lower(),
         mineru_api_key=_env_str("MINERU_API_KEY"),
         mineru_endpoint=_env_str(

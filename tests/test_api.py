@@ -44,6 +44,7 @@ def _settings(tmp_path: Path, **overrides: Any) -> Settings:
         "api_job_workers": 1,
         "api_job_ttl_seconds": 3600,
         "api_max_jobs": 10,
+        "minio_enabled": False,
         **overrides,
     }
     return replace(get_settings(), **values)

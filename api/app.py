@@ -15,6 +15,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field, field_validator, model_serializer
 
+from bidding import storage
 from bidding.config import Settings, get_settings
 from bidding.job_pipeline import execute_bid_job, execute_pipeline
 from bidding.job_state import JobBackendError, JobConflict, RedisJobStore
@@ -24,6 +25,7 @@ from bidding.writing.profile import MAX_PROFILE_BYTES
 from .celery_runner import CeleryJobRunner
 from .jobs import JobQueueFull, JobRunner, JobStore
 from .library import (
+    ARTIFACT_NAMES,
     artifact_path,
     bid_detail,
     list_bid_history,
@@ -227,6 +229,7 @@ def create_app(
             "service": "bidding-api",
             "version": application.version,
             "backend": settings.task_backend,
+            "storage": "minio" if storage.active(settings) else "local",
         }
 
     @application.post(
@@ -332,6 +335,10 @@ def create_app(
     def start_bid(request: BidJobRequest, response: Response) -> JobAccepted:
         parsed_dir = settings.parsed_dir / request.doc_id
         if not (parsed_dir / "manifest.json").is_file():
+            # Restore from MinIO when the local working cache was cleared or
+            # the document was generated on another machine.
+            storage.hydrate_document(request.doc_id, settings)
+        if not (parsed_dir / "manifest.json").is_file():
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="文档尚未解析或不存在，请先调用 POST /api/parse",
@@ -436,6 +443,11 @@ def create_app(
         ] = False,
     ) -> FileResponse:
         path = artifact_path(settings, doc_id, filename)
+        if path is None and filename in ARTIFACT_NAMES:
+            # Cache the remote object locally so desktop "open folder" and
+            # subsequent previews work without another download.
+            storage.hydrate_bid_file(doc_id, filename, settings)
+            path = artifact_path(settings, doc_id, filename)
         if path is None:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,

@@ -11,6 +11,7 @@ from typing import Any, Callable
 from ..config import Settings, get_settings
 from ..models import now_iso
 from ..parsing.pipeline import load_manifest, load_sections
+from ..storage import hydrate_document, mirror_index
 from .chunking import build_chunks, collection_for
 from .embeddings import ZhipuEmbedder
 from .errors import IngestError
@@ -97,6 +98,7 @@ def run_ingest(
     _validate_doc_id(doc_id)
     settings = get_settings()
     settings.ensure_directories()
+    hydrate_document(doc_id, settings)
     manifest = load_manifest(doc_id, settings)
     sections, entries, _ = load_sections(doc_id, settings)
     doc_dir = settings.parsed_dir / doc_id
@@ -196,6 +198,7 @@ def run_ingest(
         "warnings": warnings,
     }
     _write_json_atomic(index_manifest_path(doc_id, settings), index_manifest)
+    mirror_index(doc_id, settings)
     notify(
         f"完成：{len(chunks)} 个分块写入 {collection_name}；"
         f"embedding 调用 {embedder.calls} 次；耗时 {elapsed}s"
@@ -213,6 +216,7 @@ def inspect_document(
     """Return collection stats and, optionally, retrieval hits."""
     _validate_doc_id(doc_id)
     settings = settings or get_settings()
+    hydrate_document(doc_id, settings)
     manifest = load_manifest(doc_id, settings)
     index_manifest = load_index_manifest(doc_id, settings) or {}
     collection_name = str(

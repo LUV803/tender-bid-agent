@@ -10,6 +10,7 @@ from typing import Any, Callable
 
 from ..config import Settings, get_settings
 from ..models import now_iso
+from ..storage import hydrate_document, mirror_bid_artifacts
 from .agents import BidAgents
 from .errors import BidWriteError
 from .graph import run_writing_graph
@@ -209,6 +210,7 @@ def write_bid(
     )
 
     progress(f"读取招标文件解析与抽取结果：{doc_id}")
+    hydrate_document(doc_id, settings)
     tender = load_tender_context(doc_id, settings)
     progress(
         f"招标文件已加载：{tender.project_name}；"
@@ -300,6 +302,7 @@ def write_bid(
         manifest_path,
         json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
     )
+    mirror_bid_artifacts(doc_id, settings, output_dir=output)
     progress(f"投标文件已生成：{output}")
     return BidWriteResult(
         doc_id=doc_id,

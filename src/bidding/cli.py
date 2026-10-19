@@ -6,6 +6,7 @@ import argparse
 import sys
 from pathlib import Path
 
+from . import storage
 from .config import Settings, get_settings
 from .console import configure_stdio
 from .extraction import ExtractError, run_extract
@@ -16,6 +17,7 @@ from .indexing import (
     run_ingest,
 )
 from .parsing import ParseError, parse_document
+from .parsing.structure import sanitize_doc_id
 from .writing import BidWriteError, write_bid
 
 
@@ -225,6 +227,19 @@ def _service_status(settings: Settings) -> list[tuple[str, bool, str]]:
     except Exception as exc:
         checks.append(("Redis", False, f"{settings.redis_url} ({exc})"))
 
+    if settings.minio_enabled:
+        try:
+            target = storage.check_connection(settings)
+            checks.append(("MinIO", True, target))
+        except Exception as exc:
+            checks.append(
+                (
+                    "MinIO",
+                    False,
+                    f"{settings.minio_endpoint}/{settings.minio_bucket} ({exc})",
+                )
+            )
+
     return checks
 
 
@@ -243,8 +258,73 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
     print(f"chroma       : {settings.chroma_host}:{settings.chroma_port} "
           f"dir={settings.chroma_dir}")
     print(f"redis        : {settings.redis_url}")
+    print(f"minio        : enabled={settings.minio_enabled} "
+          f"endpoint={settings.minio_endpoint} bucket={settings.minio_bucket}")
     for name, ok, detail in _service_status(settings):
         print(f"{name:<12} : {'OK' if ok else 'FAIL'} {detail}")
+    return 0
+
+
+def _cmd_storage(args: argparse.Namespace) -> int:
+    settings = get_settings()
+    if args.action == "status":
+        print(f"enabled      : {settings.minio_enabled}")
+        print(f"configured   : {settings.minio_configured}")
+        print(f"endpoint     : {settings.minio_endpoint}")
+        print(f"bucket       : {settings.minio_bucket}")
+        try:
+            target = storage.check_connection(settings)
+        except storage.StorageError as exc:
+            print(f"connection   : FAIL {exc}")
+            return 1
+        print(f"connection   : OK {target}")
+        return 0
+
+    if not storage.active(settings):
+        print("MinIO 未启用或缺少 MINIO_ACCESS_KEY / MINIO_SECRET_KEY")
+        return 1
+    doc_id = (args.doc_id or "").strip()
+    if doc_id and sanitize_doc_id(doc_id) != doc_id:
+        raise ValueError(f"非法的 doc_id：{doc_id!r}")
+    if args.action == "restore":
+        if not doc_id:
+            raise ValueError("restore 需要 doc_id")
+        warnings = [
+            *storage.hydrate_document(doc_id, settings, include_images=True),
+            *storage.hydrate_bid(doc_id, settings),
+        ]
+        source = storage.hydrate_source(doc_id, settings)
+        if source is not None:
+            print(f"source       : {source}")
+        print(f"parsed       : {settings.parsed_dir / doc_id}")
+        print(f"bids         : {settings.bids_dir / doc_id}")
+        for warning in warnings:
+            print(f"warning      : {warning}")
+        return 0
+
+    doc_ids: set[str] = set()
+    if doc_id:
+        doc_ids.add(doc_id)
+    else:
+        for root in (settings.parsed_dir, settings.bids_dir):
+            if not root.is_dir():
+                continue
+            for child in root.iterdir():
+                if child.is_dir() and sanitize_doc_id(child.name) == child.name:
+                    doc_ids.add(child.name)
+    if not doc_ids:
+        print("没有可同步的文档")
+        return 0
+    for current in sorted(doc_ids):
+        warnings = [
+            *storage.mirror_parse_artifacts(current, settings),
+            *storage.mirror_extraction(current, settings),
+            *storage.mirror_index(current, settings),
+            *storage.mirror_bid_artifacts(current, settings),
+        ]
+        print(f"synced       : {current} (warnings={len(warnings)})")
+        for warning in warnings:
+            print(f"warning      : {warning}")
     return 0
 
 
@@ -358,6 +438,20 @@ def build_parser() -> argparse.ArgumentParser:
 
     doctor_parser = subparsers.add_parser("doctor", help="检查配置与服务连通性")
     doctor_parser.set_defaults(func=_cmd_doctor)
+
+    storage_parser = subparsers.add_parser(
+        "storage", help="MinIO 对象存储状态、同步与恢复"
+    )
+    storage_parser.add_argument(
+        "action", choices=("status", "sync", "restore"), help="要执行的操作"
+    )
+    storage_parser.add_argument(
+        "doc_id",
+        nargs="?",
+        default=None,
+        help="sync 时可只同步一个文档；restore 时必须提供",
+    )
+    storage_parser.set_defaults(func=_cmd_storage)
     return parser
 
 

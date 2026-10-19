@@ -22,6 +22,7 @@ from ..parsing.structure import (
     subtree_range,
     subtree_text,
 )
+from ..storage import hydrate_document, mirror_extraction
 from .errors import ExtractError
 from .llm import JsonLLMClient
 from .prompts import PROMPT_VERSION, build_user_prompt, route_focus
@@ -505,6 +506,7 @@ def run_extract(
     _validate_doc_id(doc_id)
     settings = get_settings()
     settings.ensure_directories()
+    hydrate_document(doc_id, settings)
     sections, entries, manifest = load_sections(doc_id, settings)
     doc_dir = settings.parsed_dir / doc_id
     markdown_path = _resolve_markdown(manifest, doc_dir, settings)
@@ -518,6 +520,7 @@ def run_extract(
         cached = _cached_document(output_path, cache_tag, str(manifest.get("parser", "")))
         if cached is not None:
             notify(f"命中整份抽取缓存：{output_path}")
+            mirror_extraction(doc_id, settings)
             return cached
 
     units = build_units(manifest, sections, entries, markdown, settings)
@@ -625,4 +628,5 @@ def run_extract(
     }
     _write_json_atomic(output_path, extraction)
     notify(f"写入 {output_path}")
+    mirror_extraction(doc_id, settings)
     return extraction

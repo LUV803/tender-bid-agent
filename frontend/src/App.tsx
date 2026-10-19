@@ -5,11 +5,12 @@ import { useHealth } from './hooks'
 import { Icon, type IconName } from './icons'
 import { useTheme } from './theme'
 import { BidView } from './views/BidView'
+import { CompanyView } from './views/CompanyView'
 import { DocumentsView } from './views/DocumentsView'
 import { HistoryView } from './views/HistoryView'
 import { UploadView } from './views/UploadView'
 
-type ViewKey = 'upload' | 'bid' | 'documents' | 'history'
+type ViewKey = 'upload' | 'bid' | 'companies' | 'documents' | 'history'
 
 const NAV: Array<{
   key: ViewKey
@@ -33,15 +34,22 @@ const NAV: Array<{
     icon: 'pen',
   },
   {
-    key: 'documents',
+    key: 'companies',
     step: '03',
+    title: '公司资料',
+    subtitle: 'PostgreSQL 持久化',
+    icon: 'database',
+  },
+  {
+    key: 'documents',
+    step: '04',
     title: '文档库',
     subtitle: '已解析文档',
     icon: 'library',
   },
   {
     key: 'history',
-    step: '04',
+    step: '05',
     title: '历史产物',
     subtitle: '预览与下载',
     icon: 'history',
@@ -190,6 +198,9 @@ function App() {
               onSelectDoc={onSelectDoc}
               selectedDocId={selectedDocId}
             />
+          </div>
+          <div className="view-pane" hidden={view !== 'companies'}>
+            <CompanyView />
           </div>
           <div className="view-pane" hidden={view !== 'documents'}>
             <DocumentsView

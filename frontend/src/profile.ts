@@ -109,6 +109,17 @@ export function parseProfileJson(
   }
 }
 
+export function mergeProfileTemplate(stored: Record<string, unknown>): Profile {
+  const base = emptyProfile()
+  return {
+    ...base,
+    ...stored,
+    company: { ...asRecord(base.company), ...asRecord(stored.company) },
+    credit: { ...asRecord(base.credit), ...asRecord(stored.credit) },
+    safety: { ...asRecord(base.safety), ...asRecord(stored.safety) },
+  }
+}
+
 export function withCompanyField(
   profile: Profile,
   key: string,

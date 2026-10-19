@@ -114,6 +114,7 @@ class Settings:
     chroma_port: int
     chroma_dir: Path
     redis_url: str
+    database_url: str
 
     minio_enabled: bool
     minio_endpoint: str
@@ -253,6 +254,7 @@ def get_settings() -> Settings:
         chroma_port=_env_int("CHROMA_PORT", 8000),
         chroma_dir=_env_path("CHROMA_DIR", "chroma_db"),
         redis_url=_env_str("REDIS_URL", "redis://localhost:6379/0"),
+        database_url=_env_str("DATABASE_URL", ""),
         minio_enabled=_env_bool("MINIO_ENABLED", False),
         minio_endpoint=_env_endpoint("MINIO_ENDPOINT", "127.0.0.1:9005"),
         minio_access_key=_env_str("MINIO_ACCESS_KEY"),

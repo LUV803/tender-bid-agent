@@ -166,13 +166,35 @@ export interface HealthInfo {
   service: string
   version: string
   backend: string
+  storage?: string
+  database?: string
 }
 
 export interface BidJobRequest {
   doc_id: string
   profile: Record<string, unknown>
+  company_id?: string | null
   max_sections: number
   max_revisions: number
+}
+
+export interface CompanySummary {
+  name: string
+  unified_social_credit_code: string
+  contact_person: string
+  phone: string
+  qualification_count: number
+  project_count: number
+  personnel_count: number
+}
+
+export interface CompanyRecord {
+  id: string
+  name: string
+  profile: Record<string, unknown>
+  summary: CompanySummary
+  created_at: string
+  updated_at: string
 }
 
 const configuredBase = (import.meta.env.VITE_API_BASE_URL as string | undefined)?.trim()
@@ -287,6 +309,37 @@ export function getBidHistory(): Promise<BidSummary[]> {
 
 export function getBidDetail(docId: string): Promise<BidDetail> {
   return request<BidDetail>(`/api/bids/${encodeURIComponent(docId)}`)
+}
+
+export function getCompanies(): Promise<CompanyRecord[]> {
+  return request<CompanyRecord[]>('/api/companies')
+}
+
+export function createCompany(
+  profile: Record<string, unknown>,
+): Promise<CompanyRecord> {
+  return request<CompanyRecord>('/api/companies', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ profile }),
+  })
+}
+
+export function updateCompany(
+  companyId: string,
+  profile: Record<string, unknown>,
+): Promise<CompanyRecord> {
+  return request<CompanyRecord>(`/api/companies/${encodeURIComponent(companyId)}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ profile }),
+  })
+}
+
+export function deleteCompany(companyId: string): Promise<void> {
+  return request<void>(`/api/companies/${encodeURIComponent(companyId)}`, {
+    method: 'DELETE',
+  })
 }
 
 export async function getArtifactText(path: string): Promise<string> {

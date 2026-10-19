@@ -15,7 +15,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field, field_validator, model_serializer
 
-from bidding import storage
+from bidding import companies, storage
+from bidding.companies import CompanyStoreError
 from bidding.config import Settings, get_settings
 from bidding.job_pipeline import execute_bid_job, execute_pipeline
 from bidding.job_state import JobBackendError, JobConflict, RedisJobStore
@@ -78,16 +79,35 @@ class JobResponse(BaseModel):
     finished_at: str | None = None
 
 
+def _validated_profile(value: dict[str, Any]) -> dict[str, Any]:
+    try:
+        size = len(
+            json.dumps(value, ensure_ascii=False, allow_nan=False).encode("utf-8")
+        )
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"profile 必须是可序列化的 JSON 对象：{exc}") from exc
+    if size > MAX_PROFILE_BYTES:
+        limit_mb = MAX_PROFILE_BYTES // (1024 * 1024)
+        raise ValueError(f"profile 超过大小上限 {limit_mb} MB")
+    return value
+
+
 class BidJobRequest(BaseModel):
     """JSON body for ``POST /api/bids``.
 
     ``profile`` is the same object accepted by ``bidder_profile.json``.  Missing
     fields become 【待填写】 placeholders; an empty object is valid and produces
-    a fully-placeholder draft.
+    a fully-placeholder draft.  When ``company_id`` is set, the persisted
+    company profile is loaded first and ``profile`` is deep-merged on top of it.
     """
 
     doc_id: str = Field(min_length=1, max_length=64)
     profile: dict[str, Any] = Field(default_factory=dict)
+    company_id: str | None = Field(
+        default=None,
+        max_length=32,
+        description="可选：从 PostgreSQL 公司资料库载入资料，profile 中的字段覆盖同名字段",
+    )
     max_sections: int = Field(
         default=0,
         ge=0,
@@ -109,19 +129,28 @@ class BidJobRequest(BaseModel):
             raise ValueError("doc_id 必须是已解析文档的安全目录名（不含空格或路径分隔符）")
         return cleaned
 
+    @field_validator("company_id")
+    @classmethod
+    def _validate_company_id(cls, value: str | None) -> str | None:
+        if value is not None and not companies.valid_company_id(value):
+            raise ValueError("company_id 必须是 32 位十六进制公司编号")
+        return value
+
     @field_validator("profile")
     @classmethod
     def _validate_profile(cls, value: dict[str, Any]) -> dict[str, Any]:
-        try:
-            size = len(
-                json.dumps(value, ensure_ascii=False, allow_nan=False).encode("utf-8")
-            )
-        except (TypeError, ValueError) as exc:
-            raise ValueError(f"profile 必须是可序列化的 JSON 对象：{exc}") from exc
-        if size > MAX_PROFILE_BYTES:
-            limit_mb = MAX_PROFILE_BYTES // (1024 * 1024)
-            raise ValueError(f"profile 超过大小上限 {limit_mb} MB")
-        return value
+        return _validated_profile(value)
+
+
+class CompanyWriteRequest(BaseModel):
+    """JSON body for creating or updating a company profile."""
+
+    profile: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("profile")
+    @classmethod
+    def _validate_profile(cls, value: dict[str, Any]) -> dict[str, Any]:
+        return _validated_profile(value)
 
 
 class UploadRejected(ValueError):
@@ -230,6 +259,7 @@ def create_app(
             "version": application.version,
             "backend": settings.task_backend,
             "storage": "minio" if storage.active(settings) else "local",
+            "database": "postgresql" if settings.database_url else "off",
         }
 
     @application.post(
@@ -326,13 +356,13 @@ def create_app(
         response_model=JobAccepted,
         summary="使用项目资料异步编写投标文件",
         responses={
-            404: {"description": "doc_id 尚未解析或不存在"},
+            404: {"description": "doc_id 尚未解析或公司资料不存在"},
             409: {"description": "文档尚未完成抽取，或已有任务在执行"},
-            422: {"description": "doc_id、profile 或参数不合法"},
-            503: {"description": "任务表已满、任务状态存储不可用或服务正在关闭"},
+            422: {"description": "doc_id、profile、company_id 或参数不合法"},
+            503: {"description": "任务表已满、公司资料库不可用或服务正在关闭"},
         },
     )
-    def start_bid(request: BidJobRequest, response: Response) -> JobAccepted:
+    async def start_bid(request: BidJobRequest, response: Response) -> JobAccepted:
         parsed_dir = settings.parsed_dir / request.doc_id
         if not (parsed_dir / "manifest.json").is_file():
             # Restore from MinIO when the local working cache was cleared or
@@ -349,13 +379,28 @@ def create_app(
                 detail="文档尚未完成结构化抽取，无法编写投标文件",
             )
 
+        profile = request.profile
+        if request.company_id:
+            try:
+                record = await companies.get_company(settings, request.company_id)
+            except CompanyStoreError as exc:
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
+                ) from exc
+            if record is None:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="公司资料不存在或已删除，请刷新公司资料库",
+                )
+            profile = companies.merge_profiles(record["profile"], request.profile)
+
         job_id = uuid.uuid4().hex
         upload_dir = settings.upload_dir / "tmp" / job_id
         upload_dir.mkdir(parents=True, exist_ok=True)
         profile_path = upload_dir / "bidder_profile.json"
         try:
             profile_path.write_text(
-                json.dumps(request.profile, ensure_ascii=False, indent=2) + "\n",
+                json.dumps(profile, ensure_ascii=False, indent=2) + "\n",
                 encoding="utf-8",
                 newline="\n",
             )
@@ -398,6 +443,107 @@ def create_app(
             doc_id=snapshot["doc_id"],
             status_url=location,
         )
+
+    def _company_id_or_422(company_id: str) -> str:
+        if not companies.valid_company_id(company_id):
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail="company_id 必须是 32 位十六进制公司编号",
+            )
+        return company_id
+
+    @application.get(
+        "/api/companies",
+        response_model=list[dict[str, Any]],
+        summary="列出 PostgreSQL 中的公司资料",
+        responses={503: {"description": "公司资料库未配置或不可用"}},
+    )
+    async def company_list() -> list[dict[str, Any]]:
+        try:
+            return await companies.list_companies(settings)
+        except CompanyStoreError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
+            ) from exc
+
+    @application.post(
+        "/api/companies",
+        status_code=status.HTTP_201_CREATED,
+        response_model=dict[str, Any],
+        summary="把投标人资料保存到 PostgreSQL",
+        responses={422: {"description": "profile 不是合法 JSON 对象或超过 2 MB"}},
+    )
+    async def company_create(request: CompanyWriteRequest) -> dict[str, Any]:
+        try:
+            return await companies.create_company(settings, request.profile)
+        except CompanyStoreError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
+            ) from exc
+
+    @application.get(
+        "/api/companies/{company_id}",
+        response_model=dict[str, Any],
+        summary="读取单个公司资料",
+        responses={404: {"description": "公司资料不存在"}},
+    )
+    async def company_detail(company_id: str) -> dict[str, Any]:
+        _company_id_or_422(company_id)
+        try:
+            record = await companies.get_company(settings, company_id)
+        except CompanyStoreError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
+            ) from exc
+        if record is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="公司资料不存在"
+            )
+        return record
+
+    @application.put(
+        "/api/companies/{company_id}",
+        response_model=dict[str, Any],
+        summary="更新公司资料",
+        responses={404: {"description": "公司资料不存在"}},
+    )
+    async def company_update(
+        company_id: str, request: CompanyWriteRequest
+    ) -> dict[str, Any]:
+        _company_id_or_422(company_id)
+        try:
+            record = await companies.update_company(
+                settings, company_id, request.profile
+            )
+        except CompanyStoreError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
+            ) from exc
+        if record is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="公司资料不存在"
+            )
+        return record
+
+    @application.delete(
+        "/api/companies/{company_id}",
+        status_code=status.HTTP_204_NO_CONTENT,
+        summary="删除公司资料",
+        responses={404: {"description": "公司资料不存在"}},
+    )
+    async def company_delete(company_id: str) -> Response:
+        _company_id_or_422(company_id)
+        try:
+            deleted = await companies.delete_company(settings, company_id)
+        except CompanyStoreError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
+            ) from exc
+        if not deleted:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="公司资料不存在"
+            )
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
 
     @application.get(
         "/api/documents",

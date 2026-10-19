@@ -26,6 +26,8 @@ export type IconName =
   | 'document-check'
   | 'sun'
   | 'moon'
+  | 'plus'
+  | 'database'
 
 const PATHS: Record<IconName, ReactNode> = {
   upload: (
@@ -173,6 +175,19 @@ const PATHS: Record<IconName, ReactNode> = {
     </>
   ),
   moon: <path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8Z" />,
+  plus: (
+    <>
+      <path d="M12 5v14" />
+      <path d="M5 12h14" />
+    </>
+  ),
+  database: (
+    <>
+      <ellipse cx="12" cy="5" rx="8" ry="3" />
+      <path d="M4 5v6c0 1.7 3.6 3 8 3s8-1.3 8-3V5" />
+      <path d="M4 11v6c0 1.7 3.6 3 8 3s8-1.3 8-3v-6" />
+    </>
+  ),
 }
 
 export function Icon({

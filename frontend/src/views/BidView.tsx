@@ -1,6 +1,14 @@
 import { useCallback, useEffect, useState } from 'react'
 import type { BidJobRequest, JobAccepted } from '../api'
-import { createBidJob, errorMessage, getBidDetail, getDocuments } from '../api'
+import {
+  createBidJob,
+  createCompany,
+  errorMessage,
+  getBidDetail,
+  getCompanies,
+  getDocuments,
+  updateCompany,
+} from '../api'
 import type { Profile } from '../profile'
 import {
   COMPANY_FIELDS,
@@ -12,6 +20,7 @@ import {
   asRecordList,
   asText,
   emptyProfile,
+  mergeProfileTemplate,
   parseProfileJson,
   profileStats,
   profileToJson,
@@ -124,6 +133,13 @@ export function BidView({
   const documents = documentsRequest.data ?? []
   const selected = documents.find((doc) => doc.doc_id === selectedDocId) ?? null
 
+  const companiesRequest = useApiData(getCompanies)
+  const companies = companiesRequest.data ?? []
+  const [companyId, setCompanyId] = useState('')
+  const [companyBusy, setCompanyBusy] = useState(false)
+  const [companyMessage, setCompanyMessage] = useState<string | null>(null)
+  const [companyError, setCompanyError] = useState<string | null>(null)
+
   const [profile, setProfile] = useState<Profile>(() => emptyProfile())
   const [jsonText, setJsonText] = useState(() => profileToJson(emptyProfile()))
   const [jsonError, setJsonError] = useState<string | null>(null)
@@ -205,6 +221,41 @@ export function BidView({
     onSelectDoc(docId)
   }
 
+  function loadCompanyProfile() {
+    const record = companies.find((item) => item.id === companyId)
+    if (!record) {
+      setCompanyError('请先选择一家公司')
+      return
+    }
+    applyProfile(mergeProfileTemplate(record.profile))
+    setCompanyMessage(`已载入「${record.name}」，可在表单中继续修改本次资料`)
+    setCompanyError(null)
+  }
+
+  async function saveCompanyProfile() {
+    if (companyBusy) return
+    setCompanyBusy(true)
+    setCompanyError(null)
+    setCompanyMessage(null)
+    try {
+      const existing = companies.find((item) => item.id === companyId)
+      const record = existing
+        ? await updateCompany(existing.id, profile)
+        : await createCompany(profile)
+      setCompanyId(record.id)
+      setCompanyMessage(
+        existing
+          ? `已更新公司资料「${record.name}」`
+          : `已保存到 PostgreSQL：「${record.name}」`,
+      )
+      companiesRequest.refresh()
+    } catch (reason) {
+      setCompanyError(errorMessage(reason))
+    } finally {
+      setCompanyBusy(false)
+    }
+  }
+
   async function startBid() {
     if (!selectedDocId || !canStart) return
     setSubmitting(true)
@@ -212,6 +263,7 @@ export function BidView({
     const body: BidJobRequest = {
       doc_id: selectedDocId,
       profile,
+      company_id: companyId || null,
       max_sections: maxSections,
       max_revisions: maxRevisions,
     }
@@ -362,6 +414,68 @@ export function BidView({
                 description="常用资料用表单填写；复杂结构（业绩、人员、财务等）可展开高级 JSON 编辑。"
                 title="投标人资料"
               />
+              <div className="company-loader">
+                <div className="company-loader-head">
+                  <span className="company-loader-icon">
+                    <Icon name="database" size={17} />
+                  </span>
+                  <div>
+                    <strong>公司资料库</strong>
+                    <small>
+                      从 PostgreSQL 载入常用资料，或把当前表单保存为新公司。
+                    </small>
+                  </div>
+                </div>
+                <div className="company-loader-controls">
+                  <select
+                    disabled={companyBusy || companiesRequest.loading}
+                    onChange={(event) => {
+                      setCompanyId(event.target.value)
+                      setCompanyMessage(null)
+                      setCompanyError(null)
+                    }}
+                    value={companyId}
+                  >
+                    <option value="">未选择已保存公司</option>
+                    {companies.map((record) => (
+                      <option key={record.id} value={record.id}>
+                        {record.name}
+                      </option>
+                    ))}
+                  </select>
+                  <button
+                    className="btn btn-ghost btn-sm"
+                    disabled={!companyId || companyBusy}
+                    onClick={loadCompanyProfile}
+                    type="button"
+                  >
+                    载入资料
+                  </button>
+                  <button
+                    className="btn btn-secondary btn-sm"
+                    disabled={companyBusy || jsonDirty}
+                    onClick={() => {
+                      void saveCompanyProfile()
+                    }}
+                    type="button"
+                  >
+                    {companyBusy ? <Spinner /> : <Icon name="database" size={15} />}
+                    {companyId ? '更新公司资料' : '保存为新公司'}
+                  </button>
+                </div>
+                {companiesRequest.error ? (
+                  <p className="company-hint warning">
+                    公司资料库不可用，仍可手动填写资料：{companiesRequest.error}
+                  </p>
+                ) : null}
+                {companyMessage ? (
+                  <p className="company-hint success">
+                    <Icon name="check" size={14} />
+                    {companyMessage}
+                  </p>
+                ) : null}
+                {companyError ? <ErrorBanner message={companyError} /> : null}
+              </div>
               <div className="completeness">
                 <span style={{ width: `${Math.round(completeness * 100)}%` }} />
               </div>

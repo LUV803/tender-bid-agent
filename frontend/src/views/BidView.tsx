@@ -295,7 +295,7 @@ export function BidView({
           </div>
         }
         description="填写投标人资料并设置编写参数，系统会基于招标文件撰写标书，并输出来源可追溯的审查报告。"
-        eyebrow="Step 02 · Write"
+        eyebrow="Step 03 · Write"
         title="投标文件编写"
       />
 

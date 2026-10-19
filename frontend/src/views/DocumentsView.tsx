@@ -15,10 +15,12 @@ import {
 export function DocumentsView({
   onWrite,
   onOpenHistory,
+  onSearch,
   onGoUpload,
 }: {
   onWrite: (docId: string) => void
   onOpenHistory: (docId: string) => void
+  onSearch: (docId: string) => void
   onGoUpload: () => void
 }) {
   const { data, loading, error, refresh } = useApiData(getDocuments)
@@ -53,7 +55,7 @@ export function DocumentsView({
           </button>
         }
         description="扫描 upload/parsed 下的解析产物，可直接选择已完成抽取的文档发起编写。"
-        eyebrow="Step 03 · Library"
+        eyebrow="Step 05 · Library"
         title="已解析文档库"
       />
 
@@ -186,6 +188,15 @@ export function DocumentsView({
                     : ''}
                 </span>
                 <div className="doc-actions">
+                  <button
+                    className="btn btn-ghost btn-sm"
+                    onClick={() => onSearch(doc.doc_id)}
+                    title="在该文档中检索评分办法、资格审查表等内容"
+                    type="button"
+                  >
+                    <Icon name="search" size={15} />
+                    检索
+                  </button>
                   {doc.bid ? (
                     <button
                       className="btn btn-ghost btn-sm"

@@ -194,7 +194,7 @@ export function CompanyView() {
           </div>
         }
         description="公司资料持久化在 PostgreSQL，写标时可直接载入并覆盖本次填写内容；未填字段仍保留【待填写】占位符。"
-        eyebrow="Step 03 · Companies"
+        eyebrow="Step 04 · Companies"
         title="公司资料库"
       />
 

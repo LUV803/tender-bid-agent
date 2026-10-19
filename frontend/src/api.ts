@@ -197,6 +197,46 @@ export interface CompanyRecord {
   updated_at: string
 }
 
+export type SearchMode = 'auto' | 'lexical' | 'hybrid'
+
+export interface SearchHit {
+  kind: string
+  kind_label: string
+  title: string
+  snippet: string
+  score: number
+  page_start: number | null
+  page_end: number | null
+  page_hint: string
+  section_path: string
+  source: 'lexical' | 'vector' | string
+  matched_terms: string[]
+  table_label?: string
+  table_title?: string
+  category?: string
+  max_score?: number | string | null
+  thresholds?: string[]
+  source_quote?: string
+  similarity?: number
+  chunk_id?: string
+}
+
+export interface SearchResponse {
+  query: string
+  core_terms: string
+  doc_id: string
+  source_name: string
+  project_name: string
+  mode: 'hybrid' | 'lexical'
+  vector_used: boolean
+  warnings: string[]
+  elapsed_ms: number
+  total: number
+  counts: Record<string, number>
+  tables: SearchHit[]
+  results: SearchHit[]
+}
+
 const configuredBase = (import.meta.env.VITE_API_BASE_URL as string | undefined)?.trim()
 
 export const API_BASE = configuredBase
@@ -301,6 +341,20 @@ export function getHealth(): Promise<HealthInfo> {
 
 export function getDocuments(): Promise<DocumentSummary[]> {
   return request<DocumentSummary[]>('/api/documents')
+}
+
+export function searchTender(
+  docId: string,
+  query: string,
+  options: { limit?: number; mode?: SearchMode } = {},
+): Promise<SearchResponse> {
+  const params = new URLSearchParams({
+    doc_id: docId,
+    q: query,
+    limit: String(options.limit ?? 15),
+    mode: options.mode ?? 'auto',
+  })
+  return request<SearchResponse>(`/api/search?${params.toString()}`)
 }
 
 export function getBidHistory(): Promise<BidSummary[]> {

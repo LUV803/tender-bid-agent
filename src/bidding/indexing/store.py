@@ -90,17 +90,19 @@ class ChromaStore:
         collection_name: str,
         embedding: list[float],
         *,
-        doc_id: str,
+        doc_id: str | None = None,
         n_results: int = 5,
     ) -> list[dict[str, Any]]:
         collection = self.collection(collection_name)
+        arguments: dict[str, Any] = {
+            "query_embeddings": [embedding],
+            "n_results": max(1, n_results),
+            "include": ["documents", "metadatas", "distances"],
+        }
+        if doc_id:
+            arguments["where"] = {"doc_id": doc_id}
         try:
-            result = collection.query(
-                query_embeddings=[embedding],
-                n_results=max(1, n_results),
-                where={"doc_id": doc_id},
-                include=["documents", "metadatas", "distances"],
-            )
+            result = collection.query(**arguments)
         except Exception as exc:
             raise IngestError(f"Chroma 查询失败：{exc}") from exc
 

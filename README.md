@@ -1,16 +1,16 @@
 # bidding
 
 招标文件解析、结构化抽取、检索索引与多 Agent 标书编写。当前已打通单文档的
-**解析 → 结构化抽取 → 分块嵌入 → Chroma 检索自检 → 多 Agent 标书编写** 流水线，
-入口为 CLI、FastAPI HTTP API 与 React/Electron 工作台。
+**解析 → 结构化抽取 → 分块嵌入 → Chroma 检索自检 → 招标检索 → 多 Agent 标书编写**
+流水线，入口为 CLI、FastAPI HTTP API 与 React/Electron 工作台。公司资料可保存
+到 PostgreSQL，并在写标时一键载入。
 
 ## 技术栈
 
 - 后端：Python 3.12、uv、FastAPI、Celery + Redis、PyMuPDF、MinerU 云解析、
   OpenAI SDK（DeepSeek / 智谱）、zai-sdk（embedding-3）、ChromaDB、LangGraph、
-  python-docx、MinIO 对象存储（可选）。
-- 规划中：SQLAlchemy + asyncpg 持久化。
-- 前端：React 19、TypeScript、Vite 8、Tailwind CSS 4、Electron 44（已有脚手架）。
+  python-docx、MinIO 对象存储（可选）、SQLAlchemy 2.0 + asyncpg（公司资料库）。
+- 前端：React 19、TypeScript、Vite 8、Tailwind CSS 4、Electron 44。
 
 ## 快速开始
 
@@ -211,6 +211,47 @@ curl -X POST "http://127.0.0.1:8001/api/bids" \
 - API 把请求体写成 `upload/tmp/<job_id>/bidder_profile.json`，worker 通过
   Celery 任务 `bidding.write_bid` 读取并在结束后删除；API 与 worker 必须共享
   `upload/` 文件系统。
+- 可选 `company_id`：先从 PostgreSQL 公司资料库载入已存资料，再把请求体
+  `profile` 深合并覆盖到其上（嵌套对象逐键合并，列表和标量整体替换）。
+
+### 招标检索
+
+对已解析文档做同步检索，不需要先入库；配置了智谱 key 时自动融合 Chroma 向量
+结果，不可用则降级为关键词 + 结构化检索并在 `warnings` 中说明。
+
+```bash
+curl "http://127.0.0.1:8001/api/search?doc_id=6055594244948&q=投标报价得分怎么算&limit=10&mode=auto"
+```
+
+- `doc_id`：必填，`upload/parsed/<doc_id>/` 下已有解析产物；本地缺失时会先尝试
+  从 MinIO 恢复。
+- `q`：必填，最多 200 字，支持自然语言问题、关键词或表号。
+- `limit`：1–30，默认 10。
+- `mode`：`auto`（默认，向量可用则混合）、`lexical`（不调用嵌入）、`hybrid`
+  （强制合并向量层）。
+- 返回 `mode`（实际使用的模式）、`vector_used`、`warnings`、`elapsed_ms`、
+  `counts`、`tables` 与 `results`。每条结果带 `page_hint` / `page_start` /
+  `page_end`、`section_path`、`matched_terms` 与 `source`；评分因素、资格要求、
+  评审标准、关键日期、合同条款等结构化条目与章节、表格统一排序。
+- 检索层会过滤目录页，按解析章节的页码范围定位多页表格，并把表号/章节重复项
+  合并为一条。页码引用用于回查 PDF，仍需人工核对原文。
+
+### 公司资料库（PostgreSQL）
+
+公司资料以整份 profile JSON 存在 `companies` 表，首次访问自动建表。配置
+`DATABASE_URL=postgresql+asyncpg://user:password@host:5432/bidding`；数据库未配置
+或不可达时，公司接口返回 503，不影响解析、检索与写标。
+
+| 接口 | 说明 |
+| --- | --- |
+| `GET /api/companies` | 按更新时间倒序列出公司，含名称、统一社会信用代码、联系人、资质数量等摘要 |
+| `POST /api/companies` | 新建，返回 `201` 与完整记录；请求体 `{"profile": {...}}` |
+| `GET /api/companies/{company_id}` | 读取单条记录，不存在返回 `404` |
+| `PUT /api/companies/{company_id}` | 全量替换 profile，返回更新后的记录 |
+| `DELETE /api/companies/{company_id}` | 删除记录，成功返回 `204` |
+
+`profile` 字段与 `bidder_profile.json` 相同，最大 2 MB。工作台“公司资料”页可直接
+编辑常用字段或高级 JSON，并在“投标编写”页载入后发起写标。
 
 ### 文档库、历史产物与文件预览
 
@@ -220,6 +261,7 @@ curl -X POST "http://127.0.0.1:8001/api/bids" \
 | 接口 | 说明 |
 | --- | --- |
 | `GET /api/health` | 服务状态、版本、任务后端与存储模式（`minio` / `local`） |
+| `GET /api/search` | 在已解析文档中做混合/关键词检索，返回页码、表号与章节引用 |
 | `GET /api/documents` | 扫描 `upload/parsed/`，返回解析清单、抽取/索引状态与关联标书摘要 |
 | `GET /api/bids` | 扫描 `upload/bids/`，按生成时间倒序返回历史产物摘要 |
 | `GET /api/bids/{doc_id}` | 返回产物详情：评分项覆盖、章节映射、审查问题、待填写清单与修订记录 |
@@ -345,10 +387,12 @@ uv run pytest
 CLI 错误处理，以及 API 上传/写标校验、202 轮询、可选抽取/入库、内存任务表、
 Redis 任务状态与 TTL/文档锁、Celery 任务路由与生命周期、双后端切换和
 `POST /api/bids` 端到端流程；文档库与产物接口覆盖清单扫描、路径白名单与文件
-预览；标书编写部分覆盖 profile 占位符、招标上下文与页码引用、固定大纲/评分矩阵、
-LangGraph 全流程、事实优先修订、Markdown/Word 产物和 CLI。MinIO 镜像、恢复与
-API 远端回退使用内存 Fake 客户端覆盖。全部为离线测试，不访问外部 API、真实
-Redis 或真实 MinIO。
+预览；招标检索覆盖多页表定位、目录页过滤、结构化去重、混合/关键词模式与
+`/api/search` 参数校验；公司资料库覆盖 PostgreSQL 存取、`company_id` 载入覆盖
+与不可用时的 503；标书编写部分覆盖 profile 占位符、招标上下文与页码引用、
+固定大纲/评分矩阵、LangGraph 全流程、事实优先修订、Markdown/Word 产物和 CLI。
+MinIO 镜像、恢复与 API 远端回退使用内存 Fake 客户端覆盖。全部为离线测试，
+不访问外部 API、真实 Redis、真实 PostgreSQL 或真实 MinIO。
 
 ## 前端工作台
 
@@ -372,12 +416,17 @@ npm --prefix frontend run electron:start
 
 1. **上传解析**：拖拽或选择 PDF，设置解析器（auto/MinerU/PyMuPDF）、结构化
    抽取与向量入库，实时展示队列阶段、进度日志和解析/抽取/入库摘要。
-2. **投标编写**：选择已完成抽取的文档；常用投标人字段用表单填写，复杂结构在
-   可折叠 JSON 编辑器中编辑，两种视图同步。可设置新增章节与自动修订上限，
-   完成后展示评分项/分值覆盖、章节映射、审查问题与修订记录。
-3. **文档库**：列出 `upload/parsed/` 下已有文档、抽取/索引状态和历史标书，可
-   直接发起编写或跳转到产物。
-4. **历史产物**：浏览 `upload/bids/` 下的历史结果，在线预览 Markdown、下载
+2. **招标检索**：选择已解析文档，输入自然语言问题或表号；可在智能混合与
+   关键词 + 结构化两种模式间切换。结果展示页码、表号、章节路径和命中词，
+   相关表格卡片可一键继续检索；命中词在摘要中高亮。
+3. **投标编写**：选择已完成抽取的文档；常用投标人字段用表单填写，复杂结构在
+   可折叠 JSON 编辑器中编辑，两种视图同步。可从公司资料库载入资料，设置新增
+   章节与自动修订上限，完成后展示评分项/分值覆盖、章节映射、审查问题与修订记录。
+4. **公司资料**：管理 PostgreSQL 中的公司资料，支持新建、编辑、删除与高级 JSON；
+   保存后可在投标编写页直接载入。
+5. **文档库**：列出 `upload/parsed/` 下已有文档、抽取/索引状态和历史标书，可
+   直接检索、发起编写或跳转到产物。
+6. **历史产物**：浏览 `upload/bids/` 下的历史结果，在线预览 Markdown、下载
    Markdown/Word/清单，并在 Electron 中通过受限 IPC 在资源管理器中定位产物目录。
 
 顶栏提供深色/浅色主题切换，首次访问跟随系统偏好，手动选择后写入

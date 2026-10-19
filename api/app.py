@@ -21,6 +21,7 @@ from bidding.config import Settings, get_settings
 from bidding.job_pipeline import execute_bid_job, execute_pipeline
 from bidding.job_state import JobBackendError, JobConflict, RedisJobStore
 from bidding.parsing.structure import sanitize_doc_id, sanitize_filename
+from bidding.search import MAX_LIMIT, MAX_QUERY_CHARS, SearchError, search_document
 from bidding.writing.profile import MAX_PROFILE_BYTES
 
 from .celery_runner import CeleryJobRunner
@@ -35,6 +36,7 @@ from .library import (
 )
 
 ParserName = Literal["auto", "cloud", "local"]
+SearchMode = Literal["auto", "lexical", "hybrid"]
 JobStatus = Literal["queued", "running", "succeeded", "failed"]
 JobStage = Literal["queued", "parse", "extract", "ingest", "write", "done"]
 UPLOAD_CHUNK_SIZE = 1024 * 1024
@@ -544,6 +546,69 @@ def create_app(
                 status_code=status.HTTP_404_NOT_FOUND, detail="公司资料不存在"
             )
         return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+    @application.get(
+        "/api/search",
+        response_model=dict[str, Any],
+        summary="在已解析的招标文件中检索",
+        responses={
+            404: {"description": "doc_id 尚未解析或不存在"},
+            422: {"description": "q、doc_id、limit 或 mode 不合法"},
+        },
+    )
+    def search(
+        doc_id: Annotated[
+            str,
+            Query(
+                min_length=1,
+                max_length=64,
+                description="已解析文档的 doc_id",
+            ),
+        ],
+        q: Annotated[
+            str,
+            Query(
+                min_length=1,
+                max_length=MAX_QUERY_CHARS,
+                description="自然语言问题或关键词，例如「投标报价得分怎么算」",
+            ),
+        ],
+        limit: Annotated[
+            int,
+            Query(ge=1, le=MAX_LIMIT, description="返回结果数量上限"),
+        ] = 10,
+        mode: Annotated[
+            SearchMode,
+            Query(
+                description="auto 优先混合检索；lexical 只用关键词与结构化层；hybrid 强制合并向量层"
+            ),
+        ] = "auto",
+    ) -> dict[str, Any]:
+        cleaned = sanitize_doc_id(doc_id)
+        if not cleaned or cleaned != doc_id:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail="doc_id 必须是已解析文档的安全目录名",
+            )
+        parsed_dir = settings.parsed_dir / cleaned
+        if not (parsed_dir / "manifest.json").is_file():
+            storage.hydrate_document(cleaned, settings)
+        if not (parsed_dir / "manifest.json").is_file():
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="文档尚未解析或不存在",
+            )
+        try:
+            return search_document(settings, cleaned, q, limit=limit, mode=mode)
+        except SearchError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)
+            ) from exc
+        except FileNotFoundError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="文档解析产物不完整，请重新解析",
+            ) from exc
 
     @application.get(
         "/api/documents",

@@ -8,9 +8,10 @@ import { BidView } from './views/BidView'
 import { CompanyView } from './views/CompanyView'
 import { DocumentsView } from './views/DocumentsView'
 import { HistoryView } from './views/HistoryView'
+import { SearchView } from './views/SearchView'
 import { UploadView } from './views/UploadView'
 
-type ViewKey = 'upload' | 'bid' | 'companies' | 'documents' | 'history'
+type ViewKey = 'upload' | 'search' | 'bid' | 'companies' | 'documents' | 'history'
 
 const NAV: Array<{
   key: ViewKey
@@ -27,29 +28,36 @@ const NAV: Array<{
     icon: 'upload',
   },
   {
-    key: 'bid',
+    key: 'search',
     step: '02',
+    title: '招标检索',
+    subtitle: '页码与表号定位',
+    icon: 'search',
+  },
+  {
+    key: 'bid',
+    step: '03',
     title: '投标编写',
     subtitle: '多 Agent 生成标书',
     icon: 'pen',
   },
   {
     key: 'companies',
-    step: '03',
+    step: '04',
     title: '公司资料',
     subtitle: 'PostgreSQL 持久化',
     icon: 'database',
   },
   {
     key: 'documents',
-    step: '04',
+    step: '05',
     title: '文档库',
     subtitle: '已解析文档',
     icon: 'library',
   },
   {
     key: 'history',
-    step: '05',
+    step: '06',
     title: '历史产物',
     subtitle: '预览与下载',
     icon: 'history',
@@ -60,6 +68,10 @@ function App() {
   const [view, setView] = useState<ViewKey>('upload')
   const [selectedDocId, setSelectedDocId] = useState<string | null>(null)
   const [historyFocus, setHistoryFocus] = useState<string | null>(null)
+  const [searchFocus, setSearchFocus] = useState<{
+    docId: string
+    token: number
+  } | null>(null)
   const { health, online } = useHealth()
   const { theme, toggleTheme } = useTheme()
   const active = NAV.find((item) => item.key === view) ?? NAV[0]
@@ -79,6 +91,14 @@ function App() {
   }, [])
 
   const consumeHistoryFocus = useCallback(() => setHistoryFocus(null), [])
+
+  const openSearch = useCallback((docId: string) => {
+    setSearchFocus((current) => ({
+      docId,
+      token: (current?.token ?? 0) + 1,
+    }))
+    setView('search')
+  }, [])
 
   const serviceTone =
     online === null ? 'pending' : online ? 'online' : 'offline'
@@ -192,6 +212,13 @@ function App() {
           <div className="view-pane" hidden={view !== 'upload'}>
             <UploadView onWrite={goWrite} />
           </div>
+          <div className="view-pane" hidden={view !== 'search'}>
+            <SearchView
+              focusToken={searchFocus?.token}
+              initialDocId={searchFocus?.docId}
+              onGoUpload={goUpload}
+            />
+          </div>
           <div className="view-pane" hidden={view !== 'bid'}>
             <BidView
               onGoUpload={goUpload}
@@ -206,6 +233,7 @@ function App() {
             <DocumentsView
               onGoUpload={goUpload}
               onOpenHistory={openHistory}
+              onSearch={openSearch}
               onWrite={goWrite}
             />
           </div>

@@ -80,7 +80,7 @@ export function HistoryView({
           </button>
         }
         description="浏览 upload/bids 下由 CLI、网页或桌面端生成的投标产物，支持在线预览、下载与打开文件夹。"
-        eyebrow="Step 04 · History"
+        eyebrow="Step 06 · History"
         title="历史投标产物"
       />
 

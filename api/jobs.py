@@ -58,7 +58,10 @@ class Job:
     extract: bool
     ingest: bool
     upload_dir: Path = field(repr=False)
-    source_path: Path = field(repr=False)
+    source_path: Path | None = field(default=None, repr=False)
+    profile_path: Path | None = field(default=None, repr=False)
+    kind: str = "parse"
+    options: dict[str, Any] = field(default_factory=dict)
     status: str = "queued"
     stage: str = "queued"
     created_at: str = field(default_factory=now_iso)
@@ -70,17 +73,19 @@ class Job:
 
     def snapshot(self) -> dict[str, Any]:
         """Return a JSON-ready copy; internal paths are never exposed."""
+        options = self.options or {
+            "parser": self.parser,
+            "extract": self.extract,
+            "ingest": self.ingest,
+        }
         return {
             "job_id": self.id,
             "status": self.status,
             "stage": self.stage,
+            "kind": self.kind,
             "filename": self.filename,
             "doc_id": self.doc_id,
-            "options": {
-                "parser": self.parser,
-                "extract": self.extract,
-                "ingest": self.ingest,
-            },
+            "options": dict(options),
             "progress": list(self.progress),
             "result": dict(self.result),
             "error": self.error,
@@ -104,18 +109,37 @@ class JobStore:
         *,
         filename: str,
         doc_id: str,
-        parser: str,
-        extract: bool,
-        ingest: bool,
+        kind: str = "parse",
+        parser: str = "auto",
+        extract: bool = False,
+        ingest: bool = False,
+        max_sections: int = 0,
+        max_revisions: int = 2,
         upload_dir: Path,
-        source_path: Path,
+        source_path: Path | None = None,
+        profile_path: Path | None = None,
         job_id: str | None = None,
     ) -> Job:
         """Register a queued job.
 
-        Only one queued/running job may target a doc_id, because parsing writes
-        to a shared ``upload/parsed/<doc_id>`` directory.
+        Only one queued/running job may target a doc_id, because parsing and
+        bid writing share the per-document artifacts under ``upload/``.
         """
+        kind = (kind or "parse").strip().lower()
+        if kind not in {"parse", "bid"}:
+            raise ValueError(f"不支持的任务类型：{kind}")
+        if kind == "bid":
+            options: dict[str, Any] = {
+                "max_sections": max(0, min(int(max_sections), 3)),
+                "max_revisions": max(0, int(max_revisions)),
+            }
+        else:
+            options = {
+                "parser": parser or "auto",
+                "extract": bool(extract),
+                "ingest": bool(ingest),
+            }
+
         job_id = job_id or uuid.uuid4().hex
         with self._lock:
             self._prune_locked()
@@ -133,11 +157,14 @@ class JobStore:
                 id=job_id,
                 filename=filename,
                 doc_id=doc_id,
-                parser=parser,
-                extract=extract,
-                ingest=ingest,
+                parser=parser or "",
+                extract=bool(extract),
+                ingest=bool(ingest),
                 upload_dir=upload_dir,
                 source_path=source_path,
+                profile_path=profile_path,
+                kind=kind,
+                options=options,
             )
             self._jobs[job_id] = job
             return job
@@ -154,7 +181,7 @@ class JobStore:
             if job is None:
                 raise JobNotFound(job_id)
             job.status = "running"
-            job.stage = "parse"
+            job.stage = "write" if job.kind == "bid" else "parse"
             job.started_at = now_iso()
             return job
 
@@ -253,15 +280,21 @@ class JobRunner:
         *,
         max_workers: int = 2,
         executor: Executor | None = None,
+        works: dict[str, Work] | None = None,
     ) -> None:
         self.store = store
         self.work = work
+        self.works: dict[str, Work] = dict(works or {})
         self._executor = executor or ThreadPoolExecutor(
             max_workers=max(1, max_workers),
             thread_name_prefix="bidding-job",
         )
         self._accepting = True
         self._lock = threading.Lock()
+
+    def register(self, kind: str, work: Work) -> None:
+        """Register an additional job kind (e.g. ``bid``)."""
+        self.works[kind] = work
 
     def submit(self, **kwargs: Any) -> dict[str, Any]:
         job = self.store.create(**kwargs)
@@ -281,8 +314,14 @@ class JobRunner:
             job = self.store.mark_running(job_id)
         except JobNotFound:
             return
+        work = self.works.get(job.kind)
+        if work is None:
+            if job.kind != "parse":
+                self.store.fail(job_id, f"不支持的任务类型：{job.kind}")
+                return
+            work = self.work
         try:
-            self.work(job, self.store)
+            work(job, self.store)
         except Exception as exc:  # noqa: BLE001 - the job must capture all failures
             logger.exception("解析任务 %s 失败", job_id)
             self.store.fail(job_id, str(exc) or exc.__class__.__name__)

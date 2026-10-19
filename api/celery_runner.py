@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from bidding.job_state import JobBackendError, RedisJobStore
-from bidding.tasks import parse_pipeline_task
+from bidding.tasks import parse_pipeline_task, write_bid_task
 
 logger = logging.getLogger(__name__)
 
@@ -31,37 +31,61 @@ class CeleryJobRunner:
         store: RedisJobStore,
         *,
         task: Any | None = None,
+        tasks: dict[str, Any] | None = None,
     ) -> None:
         self.store = store
-        self._task = task if task is not None else parse_pipeline_task
+        self._tasks: dict[str, Any] = {"parse": task or parse_pipeline_task}
+        if tasks:
+            self._tasks.update(tasks)
+        self._tasks.setdefault("bid", write_bid_task)
         self._accepting = True
         self._lock = threading.Lock()
 
+    def register(self, kind: str, task: Any) -> None:
+        """Register an additional Celery task kind (e.g. ``bid``)."""
+        self._tasks[kind] = task
+
     def submit(self, **kwargs: Any) -> dict[str, Any]:
+        values = dict(kwargs)
+        kind = str(values.pop("kind", "parse") or "parse").strip().lower()
+        task = self._tasks.get(kind)
+        if task is None:
+            raise RuntimeError(f"不支持的任务类型：{kind}")
         with self._lock:
             if not self._accepting:
                 raise _RunnerClosed("API 正在关闭，无法接受新任务")
 
-        snapshot = self.store.create(**kwargs)
+        snapshot = self.store.create(kind=kind, **values)
         job_id = snapshot["job_id"]
-        source_path: Path = kwargs["source_path"]
-        upload_dir: Path = kwargs["upload_dir"]
-        payload = {
-            "job_id": job_id,
-            "filename": snapshot["filename"],
-            "doc_id": snapshot["doc_id"],
-            "parser": snapshot["options"]["parser"],
-            "extract": snapshot["options"]["extract"],
-            "ingest": snapshot["options"]["ingest"],
-            "source_path": str(source_path.resolve()),
-            "upload_dir": str(upload_dir.resolve()),
-        }
+        upload_dir: Path = values["upload_dir"]
+        if kind == "bid":
+            profile_path: Path = values["profile_path"]
+            payload = {
+                "job_id": job_id,
+                "doc_id": snapshot["doc_id"],
+                "profile_path": str(profile_path.resolve()),
+                "max_sections": snapshot["options"]["max_sections"],
+                "max_revisions": snapshot["options"]["max_revisions"],
+                "upload_dir": str(upload_dir.resolve()),
+            }
+        else:
+            source_path: Path = values["source_path"]
+            payload = {
+                "job_id": job_id,
+                "filename": snapshot["filename"],
+                "doc_id": snapshot["doc_id"],
+                "parser": snapshot["options"]["parser"],
+                "extract": snapshot["options"]["extract"],
+                "ingest": snapshot["options"]["ingest"],
+                "source_path": str(source_path.resolve()),
+                "upload_dir": str(upload_dir.resolve()),
+            }
 
         try:
             with self._lock:
                 if not self._accepting:
                     raise _RunnerClosed("API 正在关闭，无法接受新任务")
-                self._task.apply_async(kwargs={"payload": payload}, task_id=job_id)
+                task.apply_async(kwargs={"payload": payload}, task_id=job_id)
         except _RunnerClosed:
             self._discard(job_id)
             raise

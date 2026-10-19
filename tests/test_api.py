@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import shutil
 import threading
 import time
 from dataclasses import replace
@@ -310,5 +312,170 @@ def test_active_duplicate_upload_returns_409(tmp_path: Path) -> None:
             )
             assert duplicate.status_code == 409
             assert "已有任务" in duplicate.json()["detail"]
+        finally:
+            release.set()
+
+
+def _prepare_bid_artifacts(settings: Settings, doc_id: str) -> None:
+    parsed = settings.parsed_dir / doc_id
+    parsed.mkdir(parents=True, exist_ok=True)
+    (parsed / "manifest.json").write_text(
+        json.dumps({"doc_id": doc_id, "pages": 1}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    (parsed / "extraction.json").write_text(
+        json.dumps({"project_name": "测试项目"}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+
+def _bid_runner(work) -> JobRunner:
+    return JobRunner(
+        JobStore(max_jobs=5, ttl_seconds=3600),
+        execute_pipeline,
+        executor=_InlineExecutor(),
+        works={"bid": work},
+    )
+
+
+def test_bid_accepts_json_profile_and_reuses_polling(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    doc_id = "招标A"
+    _prepare_bid_artifacts(settings, doc_id)
+    seen: list[dict[str, Any]] = []
+
+    def work(job, store) -> None:
+        try:
+            profile = json.loads(job.profile_path.read_text(encoding="utf-8"))
+            seen.append(profile)
+            store.add_progress(job.id, "编写完成")
+            store.set_result(
+                job.id,
+                "bid",
+                {
+                    "doc_id": job.doc_id,
+                    "bidder": profile["company"]["name"],
+                    "stats": {"sections": 11},
+                    "artifacts": {"markdown": "bid.md"},
+                    "warnings": [],
+                },
+            )
+        finally:
+            shutil.rmtree(job.upload_dir, ignore_errors=True)
+
+    client = _client(settings, _bid_runner(work))
+    profile = {"company": {"name": "测试投标人"}}
+
+    with client:
+        response = client.post(
+            "/api/bids",
+            json={
+                "doc_id": doc_id,
+                "profile": profile,
+                "max_sections": 2,
+                "max_revisions": 1,
+            },
+        )
+        assert response.status_code == 202
+        accepted = response.json()
+        assert accepted["status"] == "queued"
+        assert accepted["stage"] == "queued"
+        assert accepted["doc_id"] == doc_id
+        assert accepted["status_url"] == response.headers["location"]
+        assert accepted["status_url"] == f"/api/jobs/{accepted['job_id']}"
+
+        job = client.get(accepted["status_url"]).json()
+
+    assert job["status"] == "succeeded"
+    assert job["stage"] == "done"
+    assert job["kind"] == "bid"
+    assert job["filename"] == f"{doc_id} 投标文件"
+    assert job["options"] == {"max_sections": 2, "max_revisions": 1}
+    assert job["result"]["bid"]["bidder"] == "测试投标人"
+    assert job["progress"] == ["编写完成"]
+    assert seen == [profile]
+    assert not (settings.upload_dir / "tmp" / accepted["job_id"]).exists()
+
+
+def test_bid_validates_request_and_requires_parsed_extraction(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    runner = _bid_runner(lambda job, store: None)
+    client = _client(settings, runner)
+
+    with client:
+        missing = client.post("/api/bids", json={"doc_id": "未解析"})
+        assert missing.status_code == 404
+        assert "尚未解析" in missing.json()["detail"]
+
+        partial = settings.parsed_dir / "仅解析"
+        partial.mkdir(parents=True)
+        (partial / "manifest.json").write_text("{}", encoding="utf-8")
+        unparsed = client.post("/api/bids", json={"doc_id": "仅解析"})
+        assert unparsed.status_code == 409
+        assert "结构化抽取" in unparsed.json()["detail"]
+
+        bad_doc = client.post("/api/bids", json={"doc_id": "../evil"})
+        assert bad_doc.status_code == 422
+
+        too_many = client.post(
+            "/api/bids", json={"doc_id": "未解析", "max_sections": 4}
+        )
+        assert too_many.status_code == 422
+
+        too_many_revisions = client.post(
+            "/api/bids", json={"doc_id": "未解析", "max_revisions": 11}
+        )
+        assert too_many_revisions.status_code == 422
+
+        bad_profile = client.post(
+            "/api/bids", json={"doc_id": "未解析", "profile": ["not", "an", "object"]}
+        )
+        assert bad_profile.status_code == 422
+
+        oversized = client.post(
+            "/api/bids",
+            json={"doc_id": "未解析", "profile": {"note": "x" * (2 * 1024 * 1024)}},
+        )
+        assert oversized.status_code == 422
+
+    temporary = settings.upload_dir / "tmp"
+    assert not temporary.exists() or not any(temporary.iterdir())
+
+
+def test_duplicate_active_bid_for_same_document_returns_409(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    doc_id = "重复写标"
+    _prepare_bid_artifacts(settings, doc_id)
+    started = threading.Event()
+    release = threading.Event()
+
+    def work(job, store) -> None:
+        try:
+            started.set()
+            assert release.wait(5)
+        finally:
+            shutil.rmtree(job.upload_dir, ignore_errors=True)
+
+    runner = JobRunner(
+        JobStore(max_jobs=5, ttl_seconds=3600),
+        execute_pipeline,
+        max_workers=1,
+        works={"bid": work},
+    )
+    client = _client(settings, runner)
+    body = {"doc_id": doc_id, "profile": {"company": {"name": "投标人"}}}
+
+    with client:
+        first = client.post("/api/bids", json=body)
+        assert first.status_code == 202
+        assert started.wait(5)
+        try:
+            duplicate = client.post("/api/bids", json=body)
+            assert duplicate.status_code == 409
+            assert "已有任务" in duplicate.json()["detail"]
+            temporary = settings.upload_dir / "tmp"
+            assert [path.name for path in temporary.iterdir()] == [
+                first.json()["job_id"]
+            ]
         finally:
             release.set()

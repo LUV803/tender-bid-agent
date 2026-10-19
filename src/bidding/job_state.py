@@ -90,7 +90,7 @@ class RedisJobStore:
     @staticmethod
     def _snapshot(data: dict[str, str], progress: list[str]) -> dict[str, Any]:
         results: dict[str, Any] = {}
-        for name in ("parse", "extract", "ingest"):
+        for name in ("parse", "extract", "ingest", "bid"):
             raw = data.get(f"result_{name}")
             if not raw:
                 continue
@@ -98,17 +98,30 @@ class RedisJobStore:
                 results[name] = json.loads(raw)
             except json.JSONDecodeError:
                 logger.warning("任务结果 %s 不是有效 JSON，已忽略", name)
+        options: Any = {}
+        raw_options = data.get("options")
+        if raw_options:
+            try:
+                options = json.loads(raw_options)
+            except json.JSONDecodeError:
+                logger.warning("任务参数不是有效 JSON，已忽略")
+        if not isinstance(options, dict):
+            options = {}
+        if not options:
+            # Records created before the generic parse/bid options field.
+            options = {
+                "parser": data.get("parser", "auto"),
+                "extract": data.get("extract") == "1",
+                "ingest": data.get("ingest") == "1",
+            }
         return {
             "job_id": data.get("job_id", ""),
             "status": data.get("status", "queued"),
             "stage": data.get("stage", "queued"),
+            "kind": data.get("kind", "parse"),
             "filename": data.get("filename", ""),
             "doc_id": data.get("doc_id", ""),
-            "options": {
-                "parser": data.get("parser", "auto"),
-                "extract": data.get("extract") == "1",
-                "ingest": data.get("ingest") == "1",
-            },
+            "options": options,
             "progress": progress,
             "result": results,
             "error": data.get("error") or None,
@@ -123,14 +136,34 @@ class RedisJobStore:
         *,
         filename: str,
         doc_id: str,
-        parser: str,
-        extract: bool,
-        ingest: bool,
+        kind: str = "parse",
+        parser: str = "auto",
+        extract: bool = False,
+        ingest: bool = False,
+        max_sections: int = 0,
+        max_revisions: int = 2,
         upload_dir: Path,
-        source_path: Path,
+        source_path: Path | None = None,
+        profile_path: Path | None = None,
         job_id: str | None = None,
     ) -> dict[str, Any]:
         """Register a queued job and take the per-document write lock."""
+        del source_path, profile_path  # kept in the Celery payload, not job state
+        kind = (kind or "parse").strip().lower()
+        if kind not in {"parse", "bid"}:
+            raise ValueError(f"不支持的任务类型：{kind}")
+        if kind == "bid":
+            options: dict[str, Any] = {
+                "max_sections": max(0, min(int(max_sections), 3)),
+                "max_revisions": max(0, int(max_revisions)),
+            }
+        else:
+            options = {
+                "parser": parser or "auto",
+                "extract": bool(extract),
+                "ingest": bool(ingest),
+            }
+
         job_id = job_id or uuid.uuid4().hex
         lock_ttl = max(self.ttl_seconds, 3600)
         acquired = self._client.set(
@@ -146,9 +179,12 @@ class RedisJobStore:
             "job_id": job_id,
             "status": "queued",
             "stage": "queued",
+            "kind": kind,
             "filename": filename,
             "doc_id": doc_id,
-            "parser": parser,
+            "options": json.dumps(options, ensure_ascii=False),
+            # Legacy parse fields remain for older readers/records.
+            "parser": parser or "",
             "extract": "1" if extract else "0",
             "ingest": "1" if ingest else "0",
             "created_at": now_iso(),
@@ -175,11 +211,13 @@ class RedisJobStore:
 
     @_guard
     def mark_running(self, job_id: str) -> None:
+        key = self._job_key(job_id)
+        kind = self._client.hget(key, "kind") or "parse"
         self._client.hset(
-            self._job_key(job_id),
+            key,
             mapping={
                 "status": "running",
-                "stage": "parse",
+                "stage": "write" if kind == "bid" else "parse",
                 "started_at": now_iso(),
             },
         )

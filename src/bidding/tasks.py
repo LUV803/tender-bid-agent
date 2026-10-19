@@ -8,7 +8,12 @@ from pathlib import Path
 from typing import Any
 
 from .celery_app import celery_app
-from .job_pipeline import PipelineJob, execute_pipeline
+from .job_pipeline import (
+    BidPipelineJob,
+    PipelineJob,
+    execute_bid_job,
+    execute_pipeline,
+)
 from .job_state import RedisJobStore
 
 logger = logging.getLogger(__name__)
@@ -73,6 +78,61 @@ def parse_pipeline_task(payload: dict[str, Any]) -> dict[str, str]:
         # execute_pipeline cleans up too; this also covers failures before it
         # starts (Redis unavailable, missing upload) and is idempotent.
         shutil.rmtree(job.upload_dir, ignore_errors=True)
+        try:
+            store.release_doc_lock(job.id, job.doc_id)
+        except Exception:  # noqa: BLE001 - lock also expires with its own TTL
+            logger.exception("释放文档 %s 的任务锁时出错", job.doc_id)
+        store.close()
+
+    return {"job_id": job.id, "status": status}
+
+
+@celery_app.task(name="bidding.write_bid")
+def write_bid_task(payload: dict[str, Any]) -> dict[str, str]:
+    """Write a bid asynchronously and store its artifact summary in Redis.
+
+    The profile arrives as a temporary JSON file under ``upload/tmp/<job_id>/``
+    (the API and worker share the filesystem).  The full bid manifest stays in
+    ``upload/bids/<doc_id>/``; only the compact summary is written to the job
+    record.
+    """
+    job_id = str(payload.get("job_id") or "")
+    if not job_id:
+        raise ValueError("Celery 任务缺少 job_id")
+    doc_id = str(payload.get("doc_id") or "")
+    if not doc_id:
+        raise ValueError("Celery 任务缺少 doc_id")
+
+    upload_dir = Path(payload["upload_dir"])
+    job = BidPipelineJob(
+        id=job_id,
+        doc_id=doc_id,
+        profile_path=Path(payload["profile_path"]),
+        upload_dir=upload_dir,
+        max_sections=int(payload.get("max_sections") or 0),
+        max_revisions=int(payload.get("max_revisions") or 0),
+    )
+    store = RedisJobStore()
+    status = "failed"
+    try:
+        store.mark_running(job.id)
+        if not job.profile_path.is_file():
+            raise FileNotFoundError("投标人资料临时文件不存在或已被清理")
+        execute_bid_job(job, store)
+    except Exception as exc:  # noqa: BLE001 - every failure belongs to the job
+        logger.exception("写标任务 %s 失败", job.id)
+        try:
+            store.fail(job.id, _error_text(exc))
+        except Exception:  # noqa: BLE001 - Redis may itself be unavailable
+            logger.exception("记录任务 %s 失败状态时出错", job.id)
+    else:
+        try:
+            store.succeed(job.id)
+            status = "succeeded"
+        except Exception:  # noqa: BLE001
+            logger.exception("记录任务 %s 成功状态时出错", job.id)
+    finally:
+        shutil.rmtree(upload_dir, ignore_errors=True)
         try:
             store.release_doc_lock(job.id, job.doc_id)
         except Exception:  # noqa: BLE001 - lock also expires with its own TTL

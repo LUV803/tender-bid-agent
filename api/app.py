@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import shutil
 import uuid
 from contextlib import asynccontextmanager
@@ -10,27 +11,36 @@ from pathlib import Path
 from typing import Annotated, Any, Literal
 
 from fastapi import FastAPI, File, HTTPException, Query, Response, UploadFile, status
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, field_validator, model_serializer
 
 from bidding.config import Settings, get_settings
-from bidding.job_pipeline import execute_pipeline
+from bidding.job_pipeline import execute_bid_job, execute_pipeline
 from bidding.job_state import JobBackendError, JobConflict, RedisJobStore
 from bidding.parsing.structure import sanitize_doc_id, sanitize_filename
+from bidding.writing.profile import MAX_PROFILE_BYTES
 
 from .celery_runner import CeleryJobRunner
 from .jobs import JobQueueFull, JobRunner, JobStore
 
 ParserName = Literal["auto", "cloud", "local"]
 JobStatus = Literal["queued", "running", "succeeded", "failed"]
-JobStage = Literal["queued", "parse", "extract", "ingest", "done"]
+JobStage = Literal["queued", "parse", "extract", "ingest", "write", "done"]
 UPLOAD_CHUNK_SIZE = 1024 * 1024
 PDF_HEADER_WINDOW = 1024
+MAX_BID_SECTIONS = 3
 
 
 class JobOptions(BaseModel):
-    parser: ParserName
-    extract: bool
-    ingest: bool
+    parser: ParserName | None = None
+    extract: bool | None = None
+    ingest: bool | None = None
+    max_sections: int | None = None
+    max_revisions: int | None = None
+
+    @model_serializer(mode="wrap")
+    def _omit_none(self, handler):
+        """Keep parse and bid options disjoint in the polling response."""
+        return {key: value for key, value in handler(self).items() if value is not None}
 
 
 class JobAccepted(BaseModel):
@@ -45,6 +55,7 @@ class JobResponse(BaseModel):
     job_id: str
     status: JobStatus
     stage: JobStage
+    kind: Literal["parse", "bid"] = "parse"
     filename: str
     doc_id: str
     options: JobOptions
@@ -54,6 +65,52 @@ class JobResponse(BaseModel):
     created_at: str
     started_at: str | None = None
     finished_at: str | None = None
+
+
+class BidJobRequest(BaseModel):
+    """JSON body for ``POST /api/bids``.
+
+    ``profile`` is the same object accepted by ``bidder_profile.json``.  Missing
+    fields become 【待填写】 placeholders; an empty object is valid and produces
+    a fully-placeholder draft.
+    """
+
+    doc_id: str = Field(min_length=1, max_length=64)
+    profile: dict[str, Any] = Field(default_factory=dict)
+    max_sections: int = Field(
+        default=0,
+        ge=0,
+        le=MAX_BID_SECTIONS,
+        description="分析师新增章节上限；固定 11 章始终保留，0 表示不新增",
+    )
+    max_revisions: int = Field(
+        default=2,
+        ge=0,
+        le=10,
+        description="高优先级问题自动修订的章节数上限",
+    )
+
+    @field_validator("doc_id")
+    @classmethod
+    def _validate_doc_id(cls, value: str) -> str:
+        cleaned = sanitize_doc_id(value)
+        if not cleaned or cleaned != value:
+            raise ValueError("doc_id 必须是已解析文档的安全目录名（不含空格或路径分隔符）")
+        return cleaned
+
+    @field_validator("profile")
+    @classmethod
+    def _validate_profile(cls, value: dict[str, Any]) -> dict[str, Any]:
+        try:
+            size = len(
+                json.dumps(value, ensure_ascii=False, allow_nan=False).encode("utf-8")
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"profile 必须是可序列化的 JSON 对象：{exc}") from exc
+        if size > MAX_PROFILE_BYTES:
+            limit_mb = MAX_PROFILE_BYTES // (1024 * 1024)
+            raise ValueError(f"profile 超过大小上限 {limit_mb} MB")
+        return value
 
 
 class UploadRejected(ValueError):
@@ -116,6 +173,7 @@ def _default_runner(settings: Settings) -> JobRunner | CeleryJobRunner:
             ),
             execute_pipeline,
             max_workers=settings.api_job_workers,
+            works={"bid": execute_bid_job},
         )
     raise RuntimeError(f"未知 TASK_BACKEND：{backend}（可选 celery 或 memory）")
 
@@ -128,6 +186,8 @@ def create_app(
     settings = settings or get_settings()
     if runner is None:
         runner = _default_runner(settings)
+    if isinstance(runner, JobRunner) and "bid" not in runner.works:
+        runner.register("bid", execute_bid_job)
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
@@ -137,7 +197,7 @@ def create_app(
     application = FastAPI(
         title="Bidding API",
         version="0.1.0",
-        description="招标文件解析、结构化抽取与向量入库的异步任务接口。",
+        description="招标文件解析、结构化抽取、向量入库与多 Agent 标书编写的异步任务接口。",
         lifespan=lifespan,
     )
     application.state.settings = settings
@@ -214,6 +274,81 @@ def create_app(
         except UploadRejected as exc:
             shutil.rmtree(upload_dir, ignore_errors=True)
             raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+        except HTTPException:
+            shutil.rmtree(upload_dir, ignore_errors=True)
+            raise
+        except Exception:
+            shutil.rmtree(upload_dir, ignore_errors=True)
+            raise
+
+        location = f"/api/jobs/{snapshot['job_id']}"
+        response.headers["Location"] = location
+        return JobAccepted(
+            job_id=snapshot["job_id"],
+            status=snapshot["status"],
+            stage=snapshot["stage"],
+            doc_id=snapshot["doc_id"],
+            status_url=location,
+        )
+
+    @application.post(
+        "/api/bids",
+        status_code=status.HTTP_202_ACCEPTED,
+        response_model=JobAccepted,
+        summary="使用项目资料异步编写投标文件",
+        responses={
+            404: {"description": "doc_id 尚未解析或不存在"},
+            409: {"description": "文档尚未完成抽取，或已有任务在执行"},
+            422: {"description": "doc_id、profile 或参数不合法"},
+            503: {"description": "任务表已满、任务状态存储不可用或服务正在关闭"},
+        },
+    )
+    def start_bid(request: BidJobRequest, response: Response) -> JobAccepted:
+        parsed_dir = settings.parsed_dir / request.doc_id
+        if not (parsed_dir / "manifest.json").is_file():
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="文档尚未解析或不存在，请先调用 POST /api/parse",
+            )
+        if not (parsed_dir / "extraction.json").is_file():
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="文档尚未完成结构化抽取，无法编写投标文件",
+            )
+
+        job_id = uuid.uuid4().hex
+        upload_dir = settings.upload_dir / "tmp" / job_id
+        upload_dir.mkdir(parents=True, exist_ok=True)
+        profile_path = upload_dir / "bidder_profile.json"
+        try:
+            profile_path.write_text(
+                json.dumps(request.profile, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+                newline="\n",
+            )
+            try:
+                snapshot = runner.submit(
+                    job_id=job_id,
+                    filename=f"{request.doc_id} 投标文件",
+                    doc_id=request.doc_id,
+                    kind="bid",
+                    profile_path=profile_path,
+                    max_sections=request.max_sections,
+                    max_revisions=request.max_revisions,
+                    upload_dir=upload_dir,
+                )
+            except JobConflict as exc:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT, detail=str(exc)
+                ) from exc
+            except (JobQueueFull, JobBackendError) as exc:
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
+                ) from exc
+            except RuntimeError as exc:
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
+                ) from exc
         except HTTPException:
             shutil.rmtree(upload_dir, ignore_errors=True)
             raise

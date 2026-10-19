@@ -1,4 +1,6 @@
-# bidding
+# Tender Bid Agent
+
+Tender document intelligence and grounded bid generation.
 
 招标文件解析、结构化抽取、检索索引与多 Agent 标书编写。当前已打通单文档的
 **解析 → 结构化抽取 → 分块嵌入 → Chroma 检索自检 → 招标检索 → 多 Agent 标书编写**
@@ -11,6 +13,24 @@
   OpenAI SDK（DeepSeek / 智谱）、zai-sdk（embedding-3）、ChromaDB、LangGraph、
   python-docx、MinIO 对象存储（可选）、SQLAlchemy 2.0 + asyncpg（公司资料库）。
 - 前端：React 19、TypeScript、Vite 8、Tailwind CSS 4、Electron 44。
+
+## 界面预览
+
+| 上传解析 | 招标检索 |
+| --- | --- |
+| ![上传解析](docs/screenshots/01-upload.png) | ![招标检索](docs/screenshots/02-search.png) |
+
+| 投标编写 | 投标人资料 |
+| --- | --- |
+| ![投标编写](docs/screenshots/04-write.png) | ![投标人资料](docs/screenshots/03-write-profile.png) |
+
+| 公司资料库 | 文档库 |
+| --- | --- |
+| ![公司资料库](docs/screenshots/05-companies.png) | ![文档库](docs/screenshots/06-library.png) |
+
+| 历史产物 |
+| --- |
+| ![历史产物](docs/screenshots/07-history.png) |
 
 ## 快速开始
 

@@ -1,0 +1,203 @@
+"""Tests for tolerant extraction normalization, merging and grounding."""
+
+from __future__ import annotations
+
+from bidding.extraction.errors import ExtractError
+from bidding.extraction.llm import parse_json_object
+from bidding.extraction.schema import (
+    empty_extraction,
+    ground_extraction,
+    merge_extractions,
+    normalize_extraction,
+)
+from bidding.extraction.prompts import route_focus
+
+
+def test_normalize_flattens_nested_aliases_and_drops_unknown_fields() -> None:
+    raw = {
+        "basic_info": {
+            "project_name": "密云区供水工程",
+            "tender_number": "T-001",
+            "not_a_field": "ignored",
+        },
+        "evaluation": {
+            "method": "综合评估法",
+            "factors": [
+                {
+                    "name": "投标报价",
+                    "score": 40,
+                    "standard": "按公式计算",
+                    "quote": "投标报价得分",
+                }
+            ],
+        },
+        "mystery": {"anything": True},
+    }
+    result = normalize_extraction(raw)
+    assert result["project_name"] == "密云区供水工程"
+    assert result["tender_number"] == "T-001"
+    assert result["evaluation_method"] == "综合评估法"
+    assert result["evaluation_factors"] == [
+        {
+            "category": "报价",
+            "factor": "投标报价",
+            "max_score": 40.0,
+            "criteria": "按公式计算",
+            "source_quote": "投标报价得分",
+        }
+    ]
+    assert "mystery" not in result
+    assert result["bid_format"] == {"items": []}
+
+
+def test_duplicate_factors_merge_criteria_scores_and_quotes() -> None:
+    raw = {
+        "evaluation_factors": [
+            {
+                "factor": "施工组织设计",
+                "category": "技术",
+                "max_score": 10,
+                "criteria": "内容完整得 6 分",
+                "source_quote": "施工组织设计内容完整",
+            },
+            {
+                "name": "施工组织设计",
+                "max_score": 15,
+                "criteria": "针对性强加 9 分",
+                "source_quote": "施工组织设计针对性强",
+            },
+        ]
+    }
+    factors = normalize_extraction(raw)["evaluation_factors"]
+    assert len(factors) == 1
+    factor = factors[0]
+    assert factor["max_score"] == 15.0
+    assert "内容完整得 6 分" in factor["criteria"]
+    assert "针对性强加 9 分" in factor["criteria"]
+    assert factor["source_quote"].splitlines() == [
+        "施工组织设计内容完整",
+        "施工组织设计针对性强",
+    ]
+
+
+def test_duplicate_qualifications_merge_thresholds() -> None:
+    raw = {
+        "qualification_items": [
+            {
+                "name": "施工资质",
+                "category": "资质",
+                "thresholds": "水利水电工程施工总承包三级",
+                "source_quote": "具备水利水电工程施工总承包三级及以上资质",
+            },
+            {
+                "requirement": "施工资质",
+                "thresholds": ["具备有效的安全生产许可证"],
+                "source_quote": "具备有效的安全生产许可证",
+            },
+        ]
+    }
+    items = normalize_extraction(raw)["qualifications"]
+    assert len(items) == 1
+    assert items[0]["category"] == "资质"
+    assert items[0]["thresholds"] == [
+        "水利水电工程施工总承包三级",
+        "具备有效的安全生产许可证",
+    ]
+
+
+def test_bid_format_items_merge_by_title_and_keep_aliases() -> None:
+    raw = {
+        "bid_format_items": [
+            {"name": "投标函", "requirements": "加盖单位公章"},
+            {"title": "投标函", "requirements": "正本一份、副本四份"},
+            "法定代表人身份证明",
+        ]
+    }
+    items = normalize_extraction(raw)["bid_format"]["items"]
+    assert [item["title"] for item in items] == ["投标函", "法定代表人身份证明"]
+    assert "加盖单位公章" in items[0]["requirements"]
+    assert "副本四份" in items[0]["requirements"]
+
+
+def test_merge_extractions_keeps_first_scalar_and_merges_lists() -> None:
+    first = normalize_extraction(
+        {
+            "project_name": "项目 A",
+            "qualifications": [{"requirement": "资质甲级", "thresholds": ["甲级"]}],
+            "key_dates": [{"event": "开标", "time": "2024-01-01"}],
+        }
+    )
+    second = normalize_extraction(
+        {
+            "project_name": "项目 B",
+            "bid_deadline": "2024-02-02",
+            "qualifications": [{"requirement": "资质甲级", "thresholds": ["乙级"]}],
+            "key_dates": [{"event": "开标", "time": "2024-02-02"}],
+        }
+    )
+    merged = merge_extractions(first, second)
+    assert merged["project_name"] == "项目 A"
+    assert merged["bid_deadline"] == "2024-02-02"
+    assert len(merged["qualifications"]) == 1
+    assert merged["qualifications"][0]["thresholds"] == ["甲级", "乙级"]
+    # Conflicting times are kept rather than silently discarding one.
+    assert len(merged["key_dates"]) == 2
+
+
+def test_grounding_checks_each_line_of_combined_quotes() -> None:
+    markdown = (
+        "<!-- page: 1 -->\n"
+        "投标人须具备水利水电工程施工总承包三级及以上资质。\n"
+        "<!-- page: 2 -->\n"
+        "项目负责人须具备二级建造师资格。"
+    )
+    extraction = empty_extraction()
+    extraction["project_name"] = "不存在的项目"
+    extraction["qualifications"] = [
+        {
+            "category": "资质",
+            "requirement": "施工资质",
+            "thresholds": [],
+            "source_quote": (
+                "投标人须具备水利水电工程施工总承包三级及以上资质。\n"
+                "项目负责人须具备二级建造师资格。"
+            ),
+        },
+        {
+            "category": "人员",
+            "requirement": "项目经理",
+            "thresholds": [],
+            "source_quote": "项目经理须具备一级建造师资格。",
+        },
+    ]
+    ungrounded = ground_extraction(extraction, markdown)
+    fields = {item["field"] for item in ungrounded}
+    assert "project_name" in fields
+    assert "qualifications[0].source_quote" not in fields
+    assert "qualifications[1].source_quote" in fields
+
+
+def test_parse_json_object_accepts_fences_and_chatty_prefixes() -> None:
+    assert parse_json_object('```json\n{"a": 1}\n```') == {"a": 1}
+    assert parse_json_object('好的，结果如下：{"a": {"b": 2}} 请查收') == {
+        "a": {"b": 2}
+    }
+
+
+def test_parse_json_object_rejects_non_objects_and_empty_output() -> None:
+    for content in ("", "[1, 2]", "no json here"):
+        try:
+            parse_json_object(content)
+        except ExtractError:
+            pass
+        else:  # pragma: no cover - failure path
+            raise AssertionError(f"expected ExtractError for {content!r}")
+
+
+def test_route_focus_priority() -> None:
+    assert route_focus("第一卷 > 第三章 评标办法（综合评估法） > 2.评审标准") == "scoring"
+    assert route_focus("第八章 投标文件格式") == "format"
+    assert route_focus("第五章 技术标准和要求") == "technical"
+    assert route_focus("第四章 合同条款及格式") == "contract"
+    assert route_focus("第二章 投标人须知") == "qualification"
+    assert route_focus("第一章 招标公告") == "general"

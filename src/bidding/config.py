@@ -80,6 +80,7 @@ class Settings:
 
     zhipu_api_key: str
     zhipu_base_url: str
+    zhipu_chat_model: str
     embedding_model: str
     embedding_dimensions: int
     embedding_batch_size: int
@@ -118,8 +119,26 @@ class Settings:
     ingest_batch_size: int
 
     @property
+    def llm_model(self) -> str:
+        if self.llm_provider == "zhipu":
+            return self.zhipu_chat_model
+        return self.deepseek_model
+
+    @property
+    def llm_api_key(self) -> str:
+        if self.llm_provider == "zhipu":
+            return self.zhipu_api_key
+        return self.deepseek_api_key
+
+    @property
+    def llm_base_url(self) -> str:
+        if self.llm_provider == "zhipu":
+            return self.zhipu_base_url
+        return self.deepseek_base_url
+
+    @property
     def llm_configured(self) -> bool:
-        return bool(self.deepseek_api_key)
+        return bool(self.llm_api_key)
 
     @property
     def embedding_configured(self) -> bool:
@@ -169,6 +188,7 @@ def get_settings() -> Settings:
         llm_thinking=_env_str("LLM_THINKING", "disabled").lower(),
         zhipu_api_key=_env_str("ZHIPU_API_KEY"),
         zhipu_base_url=_env_str("ZHIPU_BASE_URL", "https://open.bigmodel.cn/api/paas/v4/"),
+        zhipu_chat_model=_env_str("ZHIPU_CHAT_MODEL", "glm-4-flash"),
         embedding_model=_env_str("EMBEDDING_MODEL", "embedding-3"),
         embedding_dimensions=_env_int("EMBEDDING_DIMENSIONS", 2048),
         embedding_batch_size=_env_int("EMBEDDING_BATCH_SIZE", 16),

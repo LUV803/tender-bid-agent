@@ -18,10 +18,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ```text
 src/bidding/                  Python 包（src 布局）
-src/bidding/cli.py            命令行入口：doctor / parse
+src/bidding/cli.py            命令行入口：doctor / parse / extract / ingest / inspect
 src/bidding/config.py         .env 配置与路径约定
 src/bidding/models.py         解析、抽取、索引共用数据结构
 src/bidding/parsing/          PDF 解析：结构还原、PyMuPDF、MinerU、产物落盘
+src/bidding/extraction/       结构化抽取：章节单元、LLM 容错、归一化/合并/grounding
+src/bidding/indexing/         检索索引：分块、智谱 embedding、Chroma 读写与自检
+tests/                        离线 pytest 测试
 frontend/src/                 React 前端源码
 frontend/electron/main.cjs    Electron 主进程
 upload/                       运行时上传、解析、图片与标书产物（git 忽略）
@@ -41,13 +44,20 @@ chroma_db/                    ChromaDB 持久化数据（git 忽略）
 uv sync                  # 按 uv.lock 同步依赖
 uv add <package>         # 新增运行时依赖
 uv add --dev <package>   # 新增开发依赖
-uv run pytest            # 运行测试（当前尚无测试文件）
+uv run pytest            # 运行离线测试
 uv run python -m bidding doctor                         # 检查配置与本地服务
 uv run python -m bidding parse <pdf> --parser auto      # 解析 PDF
 uv run python -m bidding.parsing <pdf>                  # 等价的快捷入口
+uv run python -m bidding extract <doc_id>               # 结构化抽取
+uv run python -m bidding ingest <doc_id|pdf>            # 分块、嵌入并写入 Chroma
+uv run python -m bidding inspect <doc_id> --query "评标办法"  # 检索测试
 ```
 
 解析产物在 `upload/parsed/<doc_id>/`：`content.md` 为带页码注释的权威全文，`manifest.json` 为摘要（不含全文），`raw/sections.json` 保存章节正文缓存；图片在 `upload/images/<doc_id>/`。`auto` 模式优先 MinerU，未配置 `MINERU_API_KEY` 时按设计跳过云端并使用 PyMuPDF 本地解析，降级原因会写入 manifest。
+
+抽取产物为同目录的 `extraction.json`；逐单元结果缓存在 `extraction_parts/`（按内容哈希与提示词/模型版本失效），中断后可直接续跑。合同等通用章节按大小压缩，评分/资格/格式章节优先细分。`ungrounded_fields` 列出无法在原文中逐字定位的字段，`extraction_meta.partial` 表示使用了 `--limit` 或存在失败单元。
+
+索引产物为同目录的 `index_manifest.json`。分块目标 450 字、硬上限 700 字、重叠 80 字；页码从嵌入文本中移除但保留在 metadata。嵌入使用智谱 `embedding-3`（2048 维），标书写入 `tender_document`，公告写入 `tender_announcement`；按 `doc_id` 先删后写，可安全重跑。`ingest` 先完成全部 embedding 再删除旧数据，避免中途失败丢失索引。
 
 ### 前端
 
@@ -84,4 +94,5 @@ uv run chroma run --path ./chroma_db
 - SQLAlchemy 固定为 2.0.x（`>=2.0,<2.1`）。
 - Tailwind CSS v4 通过 `@tailwindcss/vite` 插件接入，入口是 `frontend/src/index.css` 中的 `@import "tailwindcss";`，无需 `tailwind.config.js`。
 - `.env` 包含 LLM（DeepSeek/智谱）、PostgreSQL、Redis、Chroma、MinerU 等配置，已被 `.gitignore` 排除；不要提交或打印其中的密钥。
+- 聊天模型由 `LLM_PROVIDER` 选择 `deepseek` 或 `zhipu`。DeepSeek key 不可用时可切换为 `LLM_PROVIDER=zhipu` + `ZHIPU_CHAT_MODEL=glm-4-plus`，无需改代码；嵌入固定走智谱 `embedding-3`。
 - 修改功能后运行相关检查（`uv run pytest`、`npm --prefix frontend run build`），并按「固定任务」创建提交。

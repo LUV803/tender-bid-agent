@@ -1,0 +1,25 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Local environment / secrets
+.env
+.env.*
+!.env.example
+
+# Node
+node_modules/
+
+# ChromaDB local data
+chroma_db/
+
+# Local dev tools and Redis data
+.tools/
+redis_data/

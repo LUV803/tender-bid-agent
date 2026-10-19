@@ -3,6 +3,7 @@ import './App.css'
 import { apiUrl } from './api'
 import { useHealth } from './hooks'
 import { Icon, type IconName } from './icons'
+import { useTheme } from './theme'
 import { BidView } from './views/BidView'
 import { DocumentsView } from './views/DocumentsView'
 import { HistoryView } from './views/HistoryView'
@@ -52,7 +53,9 @@ function App() {
   const [selectedDocId, setSelectedDocId] = useState<string | null>(null)
   const [historyFocus, setHistoryFocus] = useState<string | null>(null)
   const { health, online } = useHealth()
+  const { theme, toggleTheme } = useTheme()
   const active = NAV.find((item) => item.key === view) ?? NAV[0]
+  const themeTarget = theme === 'dark' ? '浅色' : '深色'
 
   const goWrite = useCallback((docId: string) => {
     setSelectedDocId(docId)
@@ -150,6 +153,16 @@ function App() {
             </div>
           </div>
           <div className="topbar-actions">
+            <button
+              aria-label={`切换到${themeTarget}主题`}
+              className="theme-toggle"
+              onClick={toggleTheme}
+              title={`切换到${themeTarget}主题`}
+              type="button"
+            >
+              <Icon name={theme === 'dark' ? 'sun' : 'moon'} size={16} />
+              <span>{themeTarget}</span>
+            </button>
             <span className={`service-pill ${serviceTone}`}>
               <span className={`status-dot ${serviceTone}`} />
               {serviceText}

@@ -332,6 +332,10 @@ npm --prefix frontend run electron:start
 4. **历史产物**：浏览 `upload/bids/` 下的历史结果，在线预览 Markdown、下载
    Markdown/Word/清单，并在 Electron 中通过受限 IPC 在资源管理器中定位产物目录。
 
+顶栏提供深色/浅色主题切换，首次访问跟随系统偏好，手动选择后写入
+`localStorage`（`bidding-theme`）并优先于系统设置；`index.html` 的内联脚本在
+首屏渲染前应用主题，避免闪烁。窄屏下按钮只保留图标，`aria-label` 仍会说明目标主题。
+
 Vite 的 `base` 固定为 `./`，构建产物可以直接由 Electron 以 `file://` 加载；
 浏览器开发时使用相对 `/api` 路径并由 Vite 代理，桌面构建则默认请求
 `http://127.0.0.1:8001`（可用 `VITE_API_BASE_URL` 覆盖）。Markdown 预览不启用

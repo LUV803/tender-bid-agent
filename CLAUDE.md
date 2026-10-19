@@ -117,7 +117,7 @@ npm --prefix frontend run electron:start  # 先构建，再加载 dist/index.htm
 
 Electron 主进程带 `--dev` 参数时加载 `http://localhost:5173`，否则加载 `frontend/dist/index.html`。因此 Vite 配置了 `base: './'`，不要移除。Vite 固定使用 5173 端口（`strictPort`），开发时 `/api` 代理到 `http://127.0.0.1:8001`；`file://` 构建默认直连 8001，可用 `VITE_API_BASE_URL` 覆盖。`api.ts` 负责这一选择。
 
-工作台为左侧步骤导航 + 右侧工作区，四个页面始终挂载并用 `hidden` 切换，以便保留上传/编写任务状态：上传解析（拖拽 PDF、解析器与抽取/入库选项、轮询阶段与摘要）、投标编写（表单 + 高级 JSON 双向同步、参数、评分覆盖与审查报告）、文档库（`upload/parsed/` 列表、直接发起编写）、历史产物（`upload/bids/` 列表、Markdown 预览与下载）。预览使用 `react-markdown` + `remark-gfm`，不启用原始 HTML，并隐藏内部页码/分页注释。
+工作台为左侧步骤导航 + 右侧工作区，四个页面始终挂载并用 `hidden` 切换，以便保留上传/编写任务状态：上传解析（拖拽 PDF、解析器与抽取/入库选项、轮询阶段与摘要）、投标编写（表单 + 高级 JSON 双向同步、参数、评分覆盖与审查报告）、文档库（`upload/parsed/` 列表、直接发起编写）、历史产物（`upload/bids/` 列表、Markdown 预览与下载）。预览使用 `react-markdown` + `remark-gfm`，不启用原始 HTML，并隐藏内部页码/分页注释。顶栏提供深色/浅色主题切换：`theme.ts` 维护 `data-theme` 与 `localStorage` 键 `bidding-theme`，首次访问跟随系统偏好，`index.html` 的内联脚本在首屏前应用主题；新增颜色应使用 `index.css` 中的 CSS 变量并为深色主题补值。
 
 Electron 通过 `preload.cjs` 的 contextBridge 暴露 `openBidFolder`；主进程 IPC `bidding:open-bid-folder` 只允许 `upload/bids` 下的目录，并使用 `shell.openPath` 打开。不要放宽该路径校验，也不要在渲染进程启用 Node 集成。
 

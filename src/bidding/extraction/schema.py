@@ -416,7 +416,10 @@ def _is_unusable_key_date_time(value: str) -> bool:
     if _KEY_DATE_PLACEHOLDER_RE.search(text):
         return True
     # Blank form fields such as "接到本通知书后的   日内".
-    return bool(_BLANK_DATE_RE.search(text)) and not re.search(r"\d", text)
+    if _BLANK_DATE_RE.search(text) and not re.search(r"\d", text):
+        return True
+    # Reject values that carry no time reference at all.
+    return not re.search(r"\d|[年月日天时分秒前后内止至起]", text)
 
 
 def _normalize_key_date(item: Any) -> dict[str, Any] | None:

@@ -128,6 +128,7 @@ def test_key_dates_require_a_usable_time() -> None:
             {"event": "投标截止时间", "time": "本章第4.2.1项规定"},
             {"event": "开标时间", "time": ""},
             {"event": "签订合同", "time": "接到本通知书后的   日内"},
+            {"event": "确定评标基准价", "time": "采用有效报价的平均数"},
             {"event": "退还保证金", "time": "收到撤回通知之日起5日内"},
             {"event": "开标", "time": "2023-11-14 13:30"},
         ]

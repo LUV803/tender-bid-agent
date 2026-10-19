@@ -40,7 +40,7 @@ COPY_CHUNK_SIZE = 1024 * 1024
 MAX_JSON_BYTES = 32 * 1024 * 1024
 # After a connection failure, skip further remote calls briefly.  On Windows a
 # refused localhost connect can take ~2s, and a listing makes several calls.
-_RETRY_AFTER_SECONDS = 15.0
+_RETRY_AFTER_SECONDS = 60.0
 _unavailable_until = 0.0
 _unavailable_lock = threading.Lock()
 _CONTENT_TYPES = {
@@ -204,6 +204,12 @@ def _mark_unavailable() -> None:
         _unavailable_until = time.monotonic() + _RETRY_AFTER_SECONDS
 
 
+def _mark_available() -> None:
+    global _unavailable_until
+    with _unavailable_lock:
+        _unavailable_until = 0.0
+
+
 def _ensure_bucket(
     settings: Settings, client: Any | None = None, *, force: bool = False
 ) -> Any:
@@ -221,6 +227,7 @@ def _ensure_bucket(
     except Exception as exc:  # noqa: BLE001 - normalized for callers
         _mark_unavailable()
         raise StorageError(f"检查 MinIO bucket 失败：{exc}") from exc
+    _mark_available()
     return client
 
 

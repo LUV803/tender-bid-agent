@@ -91,6 +91,7 @@ def _build_manifest(
     created_at: str,
     elapsed_seconds: float,
     max_revisions: int,
+    max_sections: int,
 ) -> dict[str, Any]:
     pending = collect_pending_markers(markdown)
     review = state.get("review") or {}
@@ -117,6 +118,7 @@ def _build_manifest(
         "llm": llm_info,
         "settings": {
             "max_revisions": max_revisions,
+            "max_sections": max_sections,
             "output_dir": settings.relative(output_dir),
         },
         "artifacts": {
@@ -178,16 +180,23 @@ def write_bid(
     settings: Settings | None = None,
     llm: BidLLM | None = None,
     max_revisions: int = 2,
+    max_sections: int | None = None,
     enable_revision: bool = True,
     progress: ProgressCallback | None = None,
 ) -> BidWriteResult:
-    """Generate Markdown, Word and an internal review report for one tender."""
+    """Generate Markdown, Word and an internal review report for one tender.
+
+    ``max_sections`` caps the analyst-added sections (0–3).  ``None`` keeps the
+    CLI default of 3; the HTTP API passes 0 unless the client asks otherwise.
+    The 11 canonical sections are always generated.
+    """
     settings = settings or get_settings()
     settings.ensure_directories()
     progress = progress or (lambda _message: None)
     max_revisions = max(0, int(max_revisions))
     if not enable_revision:
         max_revisions = 0
+    max_sections = 3 if max_sections is None else max(0, min(int(max_sections), 3))
     started = time.perf_counter()
     created_at = now_iso()
 
@@ -220,6 +229,7 @@ def write_bid(
         tender=tender,
         profile=profile,
         max_revisions=max_revisions,
+        max_extra_sections=max_sections,
         progress=progress,
     )
     markdown = state.get("markdown") or ""
@@ -280,6 +290,7 @@ def write_bid(
         created_at=created_at,
         elapsed_seconds=time.perf_counter() - started,
         max_revisions=max_revisions,
+        max_sections=max_sections,
     )
 
     _write_text_atomic(markdown_path, markdown)

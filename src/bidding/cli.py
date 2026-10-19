@@ -152,6 +152,8 @@ def _cmd_inspect(args: argparse.Namespace) -> int:
 def _cmd_write(args: argparse.Namespace) -> int:
     if args.max_revisions < 0:
         raise ValueError("--max-revisions 不能为负数")
+    if not 0 <= args.max_sections <= 3:
+        raise ValueError("--max-sections 必须在 0 到 3 之间")
 
     def progress(message: str) -> None:
         print(message, flush=True)
@@ -161,6 +163,7 @@ def _cmd_write(args: argparse.Namespace) -> int:
         profile_path=args.profile,
         output_dir=args.output_dir,
         max_revisions=args.max_revisions,
+        max_sections=args.max_sections,
         enable_revision=not args.no_revise,
         progress=progress,
     )
@@ -344,6 +347,12 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=2,
         help="最多自动修订的章节数（默认 2）",
+    )
+    write_parser.add_argument(
+        "--max-sections",
+        type=int,
+        default=3,
+        help="分析师新增章节上限 0-3（默认 3；固定 11 章始终保留）",
     )
     write_parser.set_defaults(func=_cmd_write)
 

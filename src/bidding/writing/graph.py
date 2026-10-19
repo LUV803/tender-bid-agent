@@ -164,10 +164,12 @@ def build_bid_graph(
     tender: TenderContext,
     profile: BidderProfile,
     max_revisions: int = 2,
+    max_extra_sections: int = 3,
     progress: ProgressCallback | None = None,
 ):
     progress = progress or _noop_progress
     max_revisions = max(0, int(max_revisions))
+    max_extra_sections = max(0, min(int(max_extra_sections), 3))
 
     def analyst_node(state: BidState) -> dict[str, Any]:
         del state
@@ -184,7 +186,11 @@ def build_bid_graph(
             analysis = {}
             status = "fallback"
             warnings.append(f"分析师 Agent 失败，使用默认大纲继续：{exc}")
-        outline = build_outline(analysis, tender)
+        outline = build_outline(
+            analysis,
+            tender,
+            max_extra_sections=max_extra_sections,
+        )
         matrix = build_response_matrix(outline, tender)
         warnings.extend(outline.warnings)
         details = {
@@ -488,6 +494,7 @@ def run_writing_graph(
     tender: TenderContext,
     profile: BidderProfile,
     max_revisions: int = 2,
+    max_extra_sections: int = 3,
     progress: ProgressCallback | None = None,
 ) -> BidState:
     graph = build_bid_graph(
@@ -496,6 +503,7 @@ def run_writing_graph(
         tender=tender,
         profile=profile,
         max_revisions=max_revisions,
+        max_extra_sections=max_extra_sections,
         progress=progress,
     )
     result = graph.invoke(

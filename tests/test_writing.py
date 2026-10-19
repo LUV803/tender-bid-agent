@@ -459,6 +459,15 @@ def test_outline_is_deterministic_and_accepts_bounded_analyst_input(tmp_path: Pa
     assert outline.warnings
     assert outline.by_id()["x1"].origin == "analyst"
 
+    no_extras = build_outline(analysis, tender, max_extra_sections=0)
+    assert len(no_extras.sections) == 11
+    assert "x1" not in no_extras.by_id()
+    assert any("max_sections=0" in warning for warning in no_extras.warnings)
+
+    one_extra = build_outline(analysis, tender, max_extra_sections=1)
+    assert len(one_extra.sections) == 12
+    assert "x1" in one_extra.by_id()
+
     matrix = build_response_matrix(outline, tender)
     by_factor = {row["factor"]: row for row in matrix}
     assert by_factor["施工方案与技术措施"]["section_ids"] == ["technical_methods"]

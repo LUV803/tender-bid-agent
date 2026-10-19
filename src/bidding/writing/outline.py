@@ -390,14 +390,21 @@ def _clip_list(values: Any, *, limit: int = 8, chars: int = 300) -> list[str]:
 def _extra_sections(
     analysis: dict[str, Any],
     base: list[BidSection],
+    *,
+    limit: int = 3,
 ) -> tuple[list[BidSection], list[str]]:
     warnings: list[str] = []
     raw_extras = analysis.get("extra_sections")
     if not isinstance(raw_extras, list):
         return [], warnings
+    limit = max(0, min(int(limit), 3))
+    if limit == 0:
+        if raw_extras:
+            warnings.append("本次未启用分析师新增章节（max_sections=0）")
+        return [], warnings
     existing_titles = {normalize_ws(section.title) for section in base}
     extras: list[BidSection] = []
-    for raw in raw_extras[:3]:
+    for raw in raw_extras[:limit]:
         if not isinstance(raw, dict):
             continue
         title = _EXTRA_TITLE_RE.sub("", str(raw.get("title") or "")).strip()
@@ -430,7 +437,17 @@ def _extra_sections(
     return extras, warnings
 
 
-def build_outline(analysis: dict[str, Any], tender: TenderContext) -> BidOutline:
+def build_outline(
+    analysis: dict[str, Any],
+    tender: TenderContext,
+    *,
+    max_extra_sections: int = 3,
+) -> BidOutline:
+    """Build the fixed outline plus at most ``max_extra_sections`` extras.
+
+    The 11 canonical sections are always retained.  ``max_extra_sections=0``
+    keeps only the canonical structure; values are clamped to 0–3.
+    """
     base = canonical_sections()
     by_id = {section.id: section for section in base}
 
@@ -444,7 +461,11 @@ def build_outline(analysis: dict[str, Any], tender: TenderContext) -> BidOutline
             if text:
                 section.instructions.append(f"分析师提示：{text[:800]}")
 
-    extras, warnings = _extra_sections(analysis, base)
+    extras, warnings = _extra_sections(
+        analysis,
+        base,
+        limit=max_extra_sections,
+    )
     sections = list(base)
     for extra in extras:
         # Insert after the last base section with the same role, preserving the

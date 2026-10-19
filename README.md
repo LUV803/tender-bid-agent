@@ -9,7 +9,7 @@ FastAPI HTTP API。
 - 后端：Python 3.12、uv、FastAPI、Celery + Redis、PyMuPDF、MinerU 云解析、
   OpenAI SDK（DeepSeek / 智谱）、zai-sdk（embedding-3）、ChromaDB、LangGraph、
   python-docx。
-- 规划中：SQLAlchemy + asyncpg；标书编写的 HTTP/Celery 入口。
+- 规划中：SQLAlchemy + asyncpg 持久化。
 - 前端：React 19、TypeScript、Vite 8、Tailwind CSS 4、Electron 44（已有脚手架）。
 
 ## 快速开始
@@ -75,8 +75,12 @@ uv run python -m bidding write <doc_id>
 uv run python -m bidding write <doc_id> \
   --profile upload/bidder_profile.json \
   --output-dir upload/bids/<doc_id> \
-  --max-revisions 2
+  --max-revisions 2 \
+  --max-sections 0
 ```
+
+`--max-sections` 控制分析师新增章节上限（0–3，默认 3）；固定 11 章始终保留。HTTP
+接口默认 0，只生成固定章节。
 
 产物默认在 `upload/bids/<doc_id>/`：
 
@@ -120,8 +124,8 @@ uv run celery -A bidding.celery_app call bidding.ping
 ```
 
 接口文档：<http://127.0.0.1:8001/docs>（端口 8001 避免与 Chroma 的 8000 冲突）。
-API 进程只负责收文件、写 Redis 任务记录和投递 Celery 消息；解析、抽取和入库都在
-worker 中执行，因此 POST 会立即返回。
+API 进程只负责接收上传/请求、写 Redis 任务记录和投递 Celery 消息；解析、抽取、
+入库与标书编写都在 worker 中执行，因此 POST 会立即返回。
 
 ### 上传并创建解析任务
 
@@ -154,20 +158,56 @@ curl "http://127.0.0.1:8001/api/jobs/<job_id>"
 ```
 
 - `status`：`queued` → `running` → `succeeded` / `failed`。
-- `stage`：`queued` → `parse` → `extract`（可选）→ `ingest`（可选）→ `done`；
-  失败时停留在出错阶段。
+- `kind`：`parse`（解析流水线）或 `bid`（标书编写）；`options` 只包含该类型
+  对应的参数。
+- `stage`：解析任务为 `queued` → `parse` → `extract`（可选）→ `ingest`
+  （可选）→ `done`；写标任务为 `queued` → `write` → `done`。失败时停留在
+  出错阶段。
 - `progress`：最近 200 条进度消息；`result` 随阶段完成逐步出现，包含
-  `parse`（manifest）、`extract`（抽取结果）和 `ingest`（索引 manifest）。
-- 抽取通常需要 2–4 分钟，客户端只需轮询，不要为 POST 设置长读超时。
+  `parse`（manifest）、`extract`（抽取结果）、`ingest`（索引 manifest）或
+  `bid`（写标摘要）。
+- 抽取通常需要 2–4 分钟，写标可能更久；客户端只需轮询，不要为 POST 设置长读
+  超时。
 
 任务记录与进度保存在 Redis（`bidding:job:<id>`、`bidding:active-doc:<doc_id>`），
 结果随阶段完成写入任务哈希；Celery 结果后端只保存很小的任务返回值。API 重启不会
 中断正在执行的任务，轮询记录也不会丢，记录在 `API_JOB_TTL_SECONDS`（默认 24 小时）
 后过期。API 与 worker 必须共享 `upload/` 文件系统。
 
-同一 `doc_id` 同时只允许一个排队/执行中的任务（Redis 原子锁，重复上传返回 409），
-避免多个 worker 同时写 `upload/parsed/<doc_id>/`。Redis 或 broker 不可用时，提交
-返回 503；轮询在 Redis 不可用时同样返回 503。
+同一 `doc_id` 同时只允许一个排队/执行中的任务（Redis 原子锁，重复提交返回 409），
+避免多个 worker 同时写 `upload/parsed/<doc_id>/` 或 `upload/bids/<doc_id>/`。
+Redis 或 broker 不可用时，提交返回 503；轮询在 Redis 不可用时同样返回 503。
+
+### 异步编写投标文件
+
+前提：该 `doc_id` 已完成解析与结构化抽取。`profile` 直接放在 JSON 请求体中，
+字段与 `bidder_profile.json` 相同；缺失字段仍会生成【待填写】占位符。
+
+```bash
+curl -X POST "http://127.0.0.1:8001/api/bids" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "doc_id": "6055594244948",
+    "profile": {"company": {"name": "示例投标人"}},
+    "max_sections": 0,
+    "max_revisions": 2
+  }'
+```
+
+- `doc_id`：必填，必须是 `upload/parsed/<doc_id>/` 下已有解析产物的安全目录名。
+- `profile`：JSON 对象，最大 2 MB；空对象合法，将生成全占位符草稿。
+- `max_sections`：分析师新增章节上限，0–3，默认 0（固定 11 章始终保留）。
+- `max_revisions`：自动修订章节数上限，0–10，默认 2。
+- 返回与 `/api/parse` 相同的 `202`、`job_id` 与 `status_url`，继续用
+  `GET /api/jobs/<job_id>` 轮询；该任务 `kind` 为 `bid`，完成后
+  `result.bid` 包含 `doc_id`、`project_name`、`bidder`、`stats`、`artifacts`
+  和 `warnings`。
+- 文档未解析返回 404，缺少 `extraction.json`、已有同文档任务或参数不合法分别
+  返回 409 / 409 / 422。完整产物仍在 `upload/bids/<doc_id>/`，其中
+  `bid_manifest.json` 含完整统计与 Agent trace。
+- API 把请求体写成 `upload/tmp/<job_id>/bidder_profile.json`，worker 通过
+  Celery 任务 `bidding.write_bid` 读取并在结束后删除；API 与 worker 必须共享
+  `upload/` 文件系统。
 
 Windows 上 worker 请使用 `--pool=solo`；需要并发时在 POSIX 主机上运行 prefork
 worker，或在本机启动多个 solo worker（自行控制 CPU 与 API 配额）。硬/软超时由
@@ -235,11 +275,11 @@ uv run pytest
 ```
 
 测试覆盖页码分片、结构识别、抽取归一化/合并/grounding、单元构建、分块与页码映射、
-CLI 错误处理，以及 API 上传校验、202 轮询、可选抽取/入库、内存任务表、Redis
-任务状态与 TTL/文档锁、Celery 任务生命周期和双后端切换；标书编写部分覆盖
-profile 占位符、招标上下文与页码引用、固定大纲/评分矩阵、LangGraph 全流程、
-预算金额误用修订、Markdown/Word 产物和 CLI。全部为离线测试，不访问外部 API
-或真实 Redis。
+CLI 错误处理，以及 API 上传/写标校验、202 轮询、可选抽取/入库、内存任务表、
+Redis 任务状态与 TTL/文档锁、Celery 任务路由与生命周期、双后端切换和
+`POST /api/bids` 端到端流程；标书编写部分覆盖 profile 占位符、招标上下文与
+页码引用、固定大纲/评分矩阵、LangGraph 全流程、事实优先修订、Markdown/Word
+产物和 CLI。全部为离线测试，不访问外部 API 或真实 Redis。
 
 ## 前端
 

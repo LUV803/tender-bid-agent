@@ -263,6 +263,27 @@ def test_merge_extractions_keeps_first_scalar_and_merges_lists() -> None:
     assert len(merged["key_dates"]) == 2
 
 
+def test_merge_dedupes_timeline_and_other_requirements() -> None:
+    first = normalize_extraction(
+        {
+            "key_dates": [{"event": "开标", "time": "2024-01-01"}],
+            "other_requirements": ["承诺一"],
+        }
+    )
+    second = normalize_extraction(
+        {
+            "key_dates": [
+                {"event": "开标", "time": "2024-01-01"},
+                {"event": "投标截止", "time": "2024-02-02"},
+            ],
+            "other_requirements": ["承诺一", "承诺二"],
+        }
+    )
+    merged = merge_extractions(first, second)
+    assert [item["event"] for item in merged["key_dates"]] == ["开标", "投标截止"]
+    assert merged["other_requirements"] == ["承诺一", "承诺二"]
+
+
 def test_grounding_checks_each_line_of_combined_quotes() -> None:
     markdown = (
         "<!-- page: 1 -->\n"

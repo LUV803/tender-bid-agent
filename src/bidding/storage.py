@@ -24,6 +24,8 @@ import json
 import logging
 import mimetypes
 import os
+import threading
+import time
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -36,6 +38,11 @@ logger = logging.getLogger(__name__)
 DOCUMENT_PREFIX = "documents"
 COPY_CHUNK_SIZE = 1024 * 1024
 MAX_JSON_BYTES = 32 * 1024 * 1024
+# After a connection failure, skip further remote calls briefly.  On Windows a
+# refused localhost connect can take ~2s, and a listing makes several calls.
+_RETRY_AFTER_SECONDS = 15.0
+_unavailable_until = 0.0
+_unavailable_lock = threading.Lock()
 _CONTENT_TYPES = {
     ".md": "text/markdown; charset=utf-8",
     ".json": "application/json; charset=utf-8",
@@ -155,12 +162,27 @@ def _make_client(
     endpoint: str, access_key: str, secret_key: str, secure: bool
 ):
     from minio import Minio
+    import urllib3
 
+    # A stopped MinIO server must fail fast: the SDK default retries can keep
+    # a list request busy for tens of seconds.  A short-lived breaker in
+    # _ensure_bucket absorbs repeated calls; read timeouts stay generous for
+    # large files.
+    http_client = urllib3.PoolManager(
+        timeout=urllib3.Timeout(connect=3.0, read=60.0),
+        retries=urllib3.Retry(
+            total=0,
+            backoff_factor=0.2,
+            status_forcelist=(500, 502, 503, 504),
+            raise_on_status=False,
+        ),
+    )
     return Minio(
         endpoint,
         access_key=access_key,
         secret_key=secret_key,
         secure=secure,
+        http_client=http_client,
     )
 
 
@@ -176,12 +198,28 @@ def _client(settings: Settings):
     )
 
 
-def _ensure_bucket(settings: Settings, client: Any | None = None) -> Any:
+def _mark_unavailable() -> None:
+    global _unavailable_until
+    with _unavailable_lock:
+        _unavailable_until = time.monotonic() + _RETRY_AFTER_SECONDS
+
+
+def _ensure_bucket(
+    settings: Settings, client: Any | None = None, *, force: bool = False
+) -> Any:
+    if not force:
+        with _unavailable_lock:
+            blocked = time.monotonic() < _unavailable_until
+        if blocked:
+            raise StorageError(
+                "MinIO 最近连接失败，暂时跳过远端操作（稍后自动重试）"
+            )
     client = client or _client(settings)
     try:
         if not client.bucket_exists(settings.minio_bucket):
             client.make_bucket(settings.minio_bucket)
     except Exception as exc:  # noqa: BLE001 - normalized for callers
+        _mark_unavailable()
         raise StorageError(f"检查 MinIO bucket 失败：{exc}") from exc
     return client
 
@@ -729,7 +767,7 @@ def check_connection(settings: Settings | None = None) -> str:
     if not settings.minio_configured:
         raise StorageError("MINIO_ACCESS_KEY / MINIO_SECRET_KEY 未配置")
     client = _client(settings)
-    _ensure_bucket(settings, client)
+    _ensure_bucket(settings, client, force=True)
     return f"{settings.minio_endpoint}/{settings.minio_bucket}"
 
 

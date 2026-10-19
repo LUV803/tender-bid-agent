@@ -11,6 +11,8 @@ from pathlib import Path
 from typing import Annotated, Any, Literal
 
 from fastapi import FastAPI, File, HTTPException, Query, Response, UploadFile, status
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field, field_validator, model_serializer
 
 from bidding.config import Settings, get_settings
@@ -21,6 +23,13 @@ from bidding.writing.profile import MAX_PROFILE_BYTES
 
 from .celery_runner import CeleryJobRunner
 from .jobs import JobQueueFull, JobRunner, JobStore
+from .library import (
+    artifact_path,
+    bid_detail,
+    list_bid_history,
+    list_documents,
+    media_type_for,
+)
 
 ParserName = Literal["auto", "cloud", "local"]
 JobStatus = Literal["queued", "running", "succeeded", "failed"]
@@ -200,8 +209,25 @@ def create_app(
         description="招标文件解析、结构化抽取、向量入库与多 Agent 标书编写的异步任务接口。",
         lifespan=lifespan,
     )
+    application.add_middleware(
+        CORSMiddleware,
+        # Vite development server and the Electron file:// renderer (Origin: null).
+        allow_origin_regex=r"^(https?://(localhost|127\.0\.0\.1)(:\d+)?|null)$",
+        allow_methods=["*"],
+        allow_headers=["*"],
+        expose_headers=["Content-Disposition"],
+    )
     application.state.settings = settings
     application.state.runner = runner
+
+    @application.get("/api/health", summary="服务健康检查")
+    def health() -> dict[str, str]:
+        return {
+            "status": "ok",
+            "service": "bidding-api",
+            "version": application.version,
+            "backend": settings.task_backend,
+        }
 
     @application.post(
         "/api/parse",
@@ -364,6 +390,65 @@ def create_app(
             stage=snapshot["stage"],
             doc_id=snapshot["doc_id"],
             status_url=location,
+        )
+
+    @application.get(
+        "/api/documents",
+        response_model=list[dict[str, Any]],
+        summary="列出已解析文档",
+    )
+    def documents() -> list[dict[str, Any]]:
+        return list_documents(settings)
+
+    @application.get(
+        "/api/bids",
+        response_model=list[dict[str, Any]],
+        summary="列出历史投标产物",
+    )
+    def bid_history() -> list[dict[str, Any]]:
+        return list_bid_history(settings)
+
+    @application.get(
+        "/api/bids/{doc_id}",
+        response_model=dict[str, Any],
+        summary="读取投标产物详情与评分覆盖报告",
+        responses={404: {"description": "投标产物不存在"}},
+    )
+    def bid_report(doc_id: str) -> dict[str, Any]:
+        detail = bid_detail(settings, doc_id)
+        if detail is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="投标产物不存在或清单已损坏",
+            )
+        return detail
+
+    @application.get(
+        "/api/bids/{doc_id}/files/{filename}",
+        summary="预览或下载投标产物文件",
+        responses={404: {"description": "文件不存在或不在允许列表中"}},
+    )
+    def bid_file(
+        doc_id: str,
+        filename: str,
+        download: Annotated[
+            bool, Query(description="true 时以附件下载，false 时内联预览")
+        ] = False,
+    ) -> FileResponse:
+        path = artifact_path(settings, doc_id, filename)
+        if path is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="投标产物文件不存在",
+            )
+        return FileResponse(
+            path,
+            media_type=media_type_for(filename),
+            filename=filename if download else None,
+            headers={
+                "Cache-Control": "no-store",
+                "X-Content-Type-Options": "nosniff",
+            },
         )
 
     @application.get(

@@ -73,7 +73,7 @@ uv run python -m src.cli write <doc_id>                 # 等价兼容入口
 
 索引产物为同目录的 `index_manifest.json`。分块目标 450 字、硬上限 700 字、重叠 80 字；页码从嵌入文本中移除但保留在 metadata。嵌入使用智谱 `embedding-3`（2048 维），标书写入 `tender_document`，公告写入 `tender_announcement`；按 `doc_id` 先删后写，可安全重跑。`ingest` 先完成全部 embedding 再删除旧数据，避免中途失败丢失索引。
 
-投标文件编写以 `extraction.json` 为前置条件，默认读取 `upload/bidder_profile.json`，产物写入 `upload/bids/<doc_id>/`：`bid.md`、`bid.docx`、`bid_review.md`、`bid_manifest.json`。固定 11 个章节，分析师最多新增 3 个章节；行政/商务/技术三个编写 Agent 顺序执行，审查 Agent 可对最多 `--max-revisions` 个章节触发自动修订。招标文件事实只来自解析/抽取产物，投标人事实只来自 profile：缺失投标人资料写【待填写：...】，缺失招标事实写【待核对：...】；系统用确定性代码把 profile 渲染成附表，避免 LLM 改写数据。`bid_review.md` 是内部自检报告，不得随投标文件提交；API/Celery 入口尚未接入。
+投标文件编写以 `extraction.json` 为前置条件，默认读取 `upload/bidder_profile.json`，产物写入 `upload/bids/<doc_id>/`：`bid.md`、`bid.docx`、`bid_review.md`、`bid_manifest.json`。固定 11 个章节，分析师最多新增 3 个章节；行政/商务/技术三个编写 Agent 顺序执行，审查 Agent 可对最多 `--max-revisions` 个章节触发自动修订（事实/编造类问题优先于评分覆盖类问题）。招标文件事实只来自解析/抽取产物，投标人事实只来自 profile：缺失投标人资料写【待填写：...】，缺失招标事实写【待核对：...】；系统用确定性代码把 profile 渲染成附表，避免 LLM 改写数据。`bid_review.md` 是内部自检报告，不得随投标文件提交；API/Celery 入口尚未接入。
 
 ### HTTP API
 

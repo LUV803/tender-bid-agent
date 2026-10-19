@@ -24,6 +24,10 @@ src/bidding/models.py         解析、抽取、索引共用数据结构
 src/bidding/parsing/          PDF 解析：结构还原、PyMuPDF、MinerU、产物落盘
 src/bidding/extraction/       结构化抽取：章节单元、LLM 容错、归一化/合并/grounding
 src/bidding/indexing/         检索索引：分块、智谱 embedding、Chroma 读写与自检
+api/                          FastAPI 应用（根目录应用层，导入 bidding 包）
+api/app.py                    上传解析接口、轮询接口与任务流水线
+api/jobs.py                   内存任务表、线程池执行器与过期清理
+api/__main__.py               `python -m api` 启动入口
 tests/                        离线 pytest 测试
 frontend/src/                 React 前端源码
 frontend/electron/main.cjs    Electron 主进程
@@ -58,6 +62,15 @@ uv run python -m bidding inspect <doc_id> --query "评标办法"  # 检索测试
 抽取产物为同目录的 `extraction.json`；逐单元结果缓存在 `extraction_parts/`（按内容哈希与提示词/模型版本失效），中断后可直接续跑。合同等通用章节按大小压缩，评分/资格/格式章节优先细分。`ungrounded_fields` 列出无法在原文中逐字定位的字段，`extraction_meta.partial` 表示使用了 `--limit` 或存在失败单元。
 
 索引产物为同目录的 `index_manifest.json`。分块目标 450 字、硬上限 700 字、重叠 80 字；页码从嵌入文本中移除但保留在 metadata。嵌入使用智谱 `embedding-3`（2048 维），标书写入 `tender_document`，公告写入 `tender_announcement`；按 `doc_id` 先删后写，可安全重跑。`ingest` 先完成全部 embedding 再删除旧数据，避免中途失败丢失索引。
+
+### HTTP API
+
+```bash
+uv run python -m api                      # 读取 API_HOST / API_PORT，默认 127.0.0.1:8001
+uv run uvicorn api.app:app --host 127.0.0.1 --port 8001
+```
+
+`POST /api/parse` 以 multipart `file` 字段上传 PDF，立即返回 202、`job_id` 与 `status_url`；`GET /api/jobs/{job_id}` 返回 `status`、`stage`、`progress` 与分阶段 `result`。`parser`、`extract`、`ingest` 是查询参数，`extract` 与 `ingest` 相互独立。任务表只存在进程内存中，重启即丢失（已落盘的 `upload/parsed/` 产物保留），因此必须以单 worker 运行，不能使用 `uvicorn --workers N`；同一 `doc_id` 同时只允许一个排队/执行中的任务。容量、完成记录保留时间与并发数分别由 `API_MAX_JOBS`、`API_JOB_TTL_SECONDS`、`API_JOB_WORKERS` 控制。默认端口 8001，Swagger 在 `/docs`。
 
 ### 前端
 

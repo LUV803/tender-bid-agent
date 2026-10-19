@@ -68,6 +68,13 @@ class Settings:
     images_dir: Path
     bids_dir: Path
 
+    api_host: str
+    api_port: int
+    api_max_upload_mb: int
+    api_job_workers: int
+    api_job_ttl_seconds: int
+    api_max_jobs: int
+
     llm_provider: str
     deepseek_api_key: str
     deepseek_model: str
@@ -177,6 +184,12 @@ def get_settings() -> Settings:
         parsed_dir=upload_dir / "parsed",
         images_dir=upload_dir / "images",
         bids_dir=upload_dir / "bids",
+        api_host=_env_str("API_HOST", "127.0.0.1"),
+        api_port=_env_int("API_PORT", 8001),
+        api_max_upload_mb=_env_int("API_MAX_UPLOAD_MB", 200),
+        api_job_workers=_env_int("API_JOB_WORKERS", 2),
+        api_job_ttl_seconds=_env_int("API_JOB_TTL_SECONDS", 86400),
+        api_max_jobs=_env_int("API_MAX_JOBS", 100),
         llm_provider=_env_str("LLM_PROVIDER", "deepseek").lower(),
         deepseek_api_key=_env_str("DEEPSEEK_API_KEY"),
         deepseek_model=_env_str("DEEPSEEK_MODEL", "deepseek-chat"),

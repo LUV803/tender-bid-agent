@@ -1,13 +1,14 @@
 # bidding
 
 招标文件解析、结构化抽取、检索索引与多 Agent 标书编写。当前已打通单文档的
-**解析 → 结构化抽取 → 分块嵌入 → Chroma 检索自检** 流水线，入口为 CLI。
+**解析 → 结构化抽取 → 分块嵌入 → Chroma 检索自检** 流水线，入口为 CLI 与
+FastAPI HTTP API。
 
 ## 技术栈
 
-- 后端：Python 3.12、uv、PyMuPDF、MinerU 云解析、OpenAI SDK（DeepSeek / 智谱）、
-  zai-sdk（embedding-3）、ChromaDB。
-- 规划中：FastAPI、Celery + Redis、SQLAlchemy + asyncpg、LangGraph、python-docx。
+- 后端：Python 3.12、uv、FastAPI、PyMuPDF、MinerU 云解析、OpenAI SDK
+  （DeepSeek / 智谱）、zai-sdk（embedding-3）、ChromaDB。
+- 规划中：Celery + Redis 分布式任务、SQLAlchemy + asyncpg、LangGraph、python-docx。
 - 前端：React 19、TypeScript、Vite 8、Tailwind CSS 4、Electron 44（已有脚手架）。
 
 ## 快速开始
@@ -49,6 +50,60 @@ uv run python -m bidding inspect <doc_id> --query "评标办法 评分标准 资
 ```
 
 `ingest` 也可以直接接收 PDF 路径；`--force` 会强制重解析和重抽取。
+
+## HTTP API
+
+```bash
+# 默认 127.0.0.1:8001，端口在 .env 的 API_HOST / API_PORT 配置
+uv run python -m api
+# 等价：uv run uvicorn api.app:app --host 127.0.0.1 --port 8001
+```
+
+接口文档：<http://127.0.0.1:8001/docs>（端口 8001 避免与 Chroma 的 8000 冲突）。
+
+### 上传并创建解析任务
+
+```bash
+curl -X POST "http://127.0.0.1:8001/api/parse?parser=auto&extract=true&ingest=true" \
+  -F "file=@upload/files/<file>.pdf"
+```
+
+- `file`：PDF 表单字段，最大 `API_MAX_UPLOAD_MB`（默认 200 MB）。
+- `parser`：`auto`（默认）/ `cloud` / `local`。
+- `extract`：解析后继续结构化抽取，默认 `false`。
+- `ingest`：解析后继续分块、嵌入并写入 Chroma，默认 `false`；与 `extract`
+  相互独立，可只入库不抽取。
+- 立即返回 `202 Accepted`，`Location` 与 `status_url` 指向任务地址：
+
+```json
+{
+  "job_id": "1f0e...",
+  "status": "queued",
+  "stage": "queued",
+  "doc_id": "6055594244948",
+  "status_url": "/api/jobs/1f0e..."
+}
+```
+
+### 轮询任务
+
+```bash
+curl "http://127.0.0.1:8001/api/jobs/<job_id>"
+```
+
+- `status`：`queued` → `running` → `succeeded` / `failed`。
+- `stage`：`queued` → `parse` → `extract`（可选）→ `ingest`（可选）→ `done`；
+  失败时停留在出错阶段。
+- `progress`：最近 200 条进度消息；`result` 随阶段完成逐步出现，包含
+  `parse`（manifest）、`extract`（抽取结果）和 `ingest`（索引 manifest）。
+- 抽取通常需要 2–4 分钟，客户端只需轮询，不要为 POST 设置长读超时。
+
+任务表保存在进程内存中：服务重启会丢失任务记录，但 `upload/parsed/<doc_id>/`
+下的解析、抽取与索引产物仍在。也正因如此，必须以单 worker 运行（`python -m api`
+默认如此）；`uvicorn --workers N` 会让轮询请求落到其他进程并返回 404。同一
+`doc_id` 同时只允许一个排队/执行中的任务（重复上传返回 409）；任务表容量与
+保留时间由 `API_MAX_JOBS`、`API_JOB_TTL_SECONDS` 控制，并发执行数由
+`API_JOB_WORKERS` 控制。
 
 ## 解析策略
 
@@ -98,7 +153,8 @@ uv run pytest
 ```
 
 测试覆盖页码分片、结构识别、抽取归一化/合并/grounding、单元构建、分块与页码映射、
-CLI 错误处理，全部为离线测试，不访问外部 API。
+CLI 错误处理，以及 API 上传校验、202 轮询、可选抽取/入库和任务状态管理；全部为
+离线测试，不访问外部 API。
 
 ## 前端
 

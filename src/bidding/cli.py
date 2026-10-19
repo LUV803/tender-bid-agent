@@ -240,7 +240,7 @@ def build_parser() -> argparse.ArgumentParser:
     extract_parser.set_defaults(func=_cmd_extract)
 
     ingest_parser = subparsers.add_parser(
-        "ingest", help="分块并从向量化写入 Chroma（可给 PDF 或 doc_id）"
+        "ingest", help="分块并向量化写入 Chroma（可给 PDF 或 doc_id）"
     )
     ingest_parser.add_argument("source", help="PDF 路径或已解析的 doc_id")
     ingest_parser.add_argument(

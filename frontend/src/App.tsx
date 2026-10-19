@@ -1,121 +1,200 @@
-import { useState } from 'react'
-import heroImg from './assets/hero.png'
-import reactLogo from './assets/react.svg'
-import viteLogo from './assets/vite.svg'
+import { useCallback, useState } from 'react'
 import './App.css'
+import { apiUrl } from './api'
+import { useHealth } from './hooks'
+import { Icon, type IconName } from './icons'
+import { BidView } from './views/BidView'
+import { DocumentsView } from './views/DocumentsView'
+import { HistoryView } from './views/HistoryView'
+import { UploadView } from './views/UploadView'
+
+type ViewKey = 'upload' | 'bid' | 'documents' | 'history'
+
+const NAV: Array<{
+  key: ViewKey
+  step: string
+  title: string
+  subtitle: string
+  icon: IconName
+}> = [
+  {
+    key: 'upload',
+    step: '01',
+    title: '上传解析',
+    subtitle: 'PDF → 结构化全文',
+    icon: 'upload',
+  },
+  {
+    key: 'bid',
+    step: '02',
+    title: '投标编写',
+    subtitle: '多 Agent 生成标书',
+    icon: 'pen',
+  },
+  {
+    key: 'documents',
+    step: '03',
+    title: '文档库',
+    subtitle: '已解析文档',
+    icon: 'library',
+  },
+  {
+    key: 'history',
+    step: '04',
+    title: '历史产物',
+    subtitle: '预览与下载',
+    icon: 'history',
+  },
+]
 
 function App() {
-  const [count, setCount] = useState(0)
+  const [view, setView] = useState<ViewKey>('upload')
+  const [selectedDocId, setSelectedDocId] = useState<string | null>(null)
+  const [historyFocus, setHistoryFocus] = useState<string | null>(null)
+  const { health, online } = useHealth()
+  const active = NAV.find((item) => item.key === view) ?? NAV[0]
+
+  const goWrite = useCallback((docId: string) => {
+    setSelectedDocId(docId)
+    setView('bid')
+  }, [])
+
+  const goUpload = useCallback(() => setView('upload'), [])
+  const onSelectDoc = useCallback((docId: string) => setSelectedDocId(docId), [])
+
+  const openHistory = useCallback((docId: string) => {
+    setHistoryFocus(docId)
+    setView('history')
+  }, [])
+
+  const consumeHistoryFocus = useCallback(() => setHistoryFocus(null), [])
+
+  const serviceTone =
+    online === null ? 'pending' : online ? 'online' : 'offline'
+  const serviceText =
+    online === null ? '检测中' : online ? '服务正常' : '服务离线'
 
   return (
-    <>
-      <section id="center">
-        <div className="hero">
-          <img src={heroImg} className="base" width="170" height="179" alt="" />
-          <img src={reactLogo} className="framework" alt="React logo" />
-          <img src={viteLogo} className="vite" alt="Vite logo" />
+    <div className="app-shell">
+      <aside className="sidebar">
+        <div className="brand">
+          <span className="brand-mark">
+            <Icon name="document-check" size={22} />
+          </span>
+          <div className="brand-copy">
+            <strong>标书工坊</strong>
+            <span>BIDDING AGENT</span>
+          </div>
         </div>
-        <div>
-          <h1>Get started</h1>
+
+        <nav className="step-nav">
+          <div className="nav-label">工作流</div>
+          {NAV.map((item) => (
+            <button
+              className={`nav-item ${view === item.key ? 'is-active' : ''}`}
+              key={item.key}
+              onClick={() => setView(item.key)}
+              type="button"
+            >
+              <span className="nav-step">{item.step}</span>
+              <span className="nav-icon">
+                <Icon name={item.icon} size={18} />
+              </span>
+              <span className="nav-copy">
+                <strong>{item.title}</strong>
+                <small>{item.subtitle}</small>
+              </span>
+              {view === item.key ? (
+                <span className="nav-active-mark">
+                  <Icon name="arrow-right" size={14} />
+                </span>
+              ) : null}
+            </button>
+          ))}
+        </nav>
+
+        <div className="sidebar-note">
+          <div className="sidebar-note-head">
+            <Icon name="shield" size={16} />
+            <strong>事实可追溯</strong>
+          </div>
           <p>
-            Edit <code>src/App.tsx</code> and save to test <code>HMR</code>
+            招标事实只来自解析与抽取产物，投标人事实只来自本项目资料；缺失字段保留
+            【待填写】占位符。
           </p>
+          <div className="sidebar-tags">
+            <span>固定 11 章</span>
+            <span>内部审查</span>
+          </div>
         </div>
-        <button
-          type="button"
-          className="counter"
-          onClick={() => setCount((count) => count + 1)}
-        >
-          Count is {count}
-        </button>
-      </section>
 
-      <div className="ticks"></div>
-
-      <section id="next-steps">
-        <div id="docs">
-          <svg className="icon" role="presentation" aria-hidden="true">
-            <use href="/icons.svg#documentation-icon"></use>
-          </svg>
-          <h2>Documentation</h2>
-          <p>Your questions, answered</p>
-          <ul>
-            <li>
-              <a href="https://vite.dev/" target="_blank">
-                <img className="logo" src={viteLogo} alt="" />
-                Explore Vite
-              </a>
-            </li>
-            <li>
-              <a href="https://react.dev/" target="_blank">
-                <img className="button-icon" src={reactLogo} alt="" />
-                Learn more
-              </a>
-            </li>
-          </ul>
+        <div className="sidebar-foot">
+          <span className={`status-dot ${serviceTone}`} />
+          <div>
+            <strong>{online === false ? '后端未连接' : '本机工作区'}</strong>
+            <small>
+              {health?.backend ? `${health.backend.toUpperCase()} · ` : ''}
+              FastAPI 8001
+            </small>
+          </div>
         </div>
-        <div id="social">
-          <svg className="icon" role="presentation" aria-hidden="true">
-            <use href="/icons.svg#social-icon"></use>
-          </svg>
-          <h2>Connect with us</h2>
-          <p>Join the Vite community</p>
-          <ul>
-            <li>
-              <a href="https://github.com/vitejs/vite" target="_blank">
-                <svg
-                  className="button-icon"
-                  role="presentation"
-                  aria-hidden="true"
-                >
-                  <use href="/icons.svg#github-icon"></use>
-                </svg>
-                GitHub
-              </a>
-            </li>
-            <li>
-              <a href="https://chat.vite.dev/" target="_blank">
-                <svg
-                  className="button-icon"
-                  role="presentation"
-                  aria-hidden="true"
-                >
-                  <use href="/icons.svg#discord-icon"></use>
-                </svg>
-                Discord
-              </a>
-            </li>
-            <li>
-              <a href="https://x.com/vite_js" target="_blank">
-                <svg
-                  className="button-icon"
-                  role="presentation"
-                  aria-hidden="true"
-                >
-                  <use href="/icons.svg#x-icon"></use>
-                </svg>
-                X.com
-              </a>
-            </li>
-            <li>
-              <a href="https://bsky.app/profile/vite.dev" target="_blank">
-                <svg
-                  className="button-icon"
-                  role="presentation"
-                  aria-hidden="true"
-                >
-                  <use href="/icons.svg#bluesky-icon"></use>
-                </svg>
-                Bluesky
-              </a>
-            </li>
-          </ul>
-        </div>
-      </section>
+      </aside>
 
-      <div className="ticks"></div>
-      <section id="spacer"></section>
-    </>
+      <div className="main-column">
+        <header className="topbar">
+          <div className="topbar-title">
+            <span className="topbar-kicker">Tender Intelligence</span>
+            <div>
+              <h1>招标文件多智能体系统</h1>
+              <span className="topbar-context">/ {active.title}</span>
+            </div>
+          </div>
+          <div className="topbar-actions">
+            <span className={`service-pill ${serviceTone}`}>
+              <span className={`status-dot ${serviceTone}`} />
+              {serviceText}
+              <strong>8001</strong>
+            </span>
+            <a
+              className="btn btn-ghost btn-sm topbar-link"
+              href={apiUrl('/docs')}
+              rel="noreferrer"
+              target="_blank"
+            >
+              API 文档
+              <Icon name="external" size={14} />
+            </a>
+          </div>
+        </header>
+
+        <main className="workspace">
+          <div className="view-pane" hidden={view !== 'upload'}>
+            <UploadView onWrite={goWrite} />
+          </div>
+          <div className="view-pane" hidden={view !== 'bid'}>
+            <BidView
+              onGoUpload={goUpload}
+              onSelectDoc={onSelectDoc}
+              selectedDocId={selectedDocId}
+            />
+          </div>
+          <div className="view-pane" hidden={view !== 'documents'}>
+            <DocumentsView
+              onGoUpload={goUpload}
+              onOpenHistory={openHistory}
+              onWrite={goWrite}
+            />
+          </div>
+          <div className="view-pane" hidden={view !== 'history'}>
+            <HistoryView
+              focusDocId={historyFocus}
+              onFocusConsumed={consumeHistoryFocus}
+              onGoBid={() => setView('bid')}
+            />
+          </div>
+        </main>
+      </div>
+    </div>
   )
 }
 

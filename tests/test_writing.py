@@ -564,6 +564,62 @@ def test_deterministic_review_flags_system_fill_and_bad_reference(
     assert any("不存在的章节" in item["problem"] for item in issues)
 
 
+def test_revision_prioritizes_fact_issues_over_coverage(tmp_path: Path) -> None:
+    class PriorityLLM(FakeBidLLM):
+        def complete_json(
+            self, system: str, user: str, *, purpose: str = ""
+        ) -> dict[str, Any]:
+            data = super().complete_json(system, user, purpose=purpose)
+            if purpose == "reviewer":
+                data["issues"] = [
+                    {
+                        "severity": "high",
+                        "category": "coverage",
+                        "section_id": "bid_letter",
+                        "problem": "未逐项响应招标文件格式要求",
+                        "fix": "按第八章格式补充响应",
+                        "tender_basis": "第八章",
+                    },
+                    {
+                        "severity": "high",
+                        "category": "fact",
+                        "section_id": "company_qualification",
+                        "problem": "未经投标人资料支持：投标人已获得质量认证",
+                        "fix": "删除该肯定句或改为【待填写：认证信息】",
+                        "tender_basis": "",
+                    },
+                ]
+            return data
+
+        def complete_text(
+            self, system: str, user: str, *, purpose: str = ""
+        ) -> str:
+            if purpose == "writer:price_commitments":
+                self.calls += 1
+                self.purposes.append(purpose)
+                self.user_prompts.append(user)
+                return f"## {self._title(user)}\n\n投标报价为【待填写：投标总报价】。"
+            return super().complete_text(system, user, purpose=purpose)
+
+    settings, profile_path = _fixture(tmp_path)
+    profile = load_profile(profile_path)
+    tender = load_tender_context(DOC_ID, settings)
+    retriever = TenderRetriever(tender)
+    from bidding.writing.agents import BidAgents
+
+    state = run_writing_graph(
+        agents=BidAgents(PriorityLLM(), profile, tender, retriever),
+        retriever=retriever,
+        tender=tender,
+        profile=profile,
+        max_revisions=1,
+    )
+    assert [item["section_id"] for item in state["revisions"]] == [
+        "company_qualification"
+    ]
+    assert any("按上限仅自动修订 1 个" in item for item in state["warnings"])
+
+
 def test_graph_ignores_placeholder_only_unverified_claims(tmp_path: Path) -> None:
     class ClaimReviewLLM(FakeBidLLM):
         def complete_json(

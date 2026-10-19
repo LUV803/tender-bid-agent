@@ -63,6 +63,21 @@ def _entry(
     }
 
 
+def _revision_priority(issues: list[dict[str, Any]]) -> int:
+    """Prefer fact/fabrication fixes over coverage polish when revisions are capped."""
+    for issue in issues:
+        category = str(issue.get("category") or "")
+        problem = str(issue.get("problem") or "")
+        if (
+            category in {"fact", "事实依据"}
+            or "未经投标人资料支持" in problem
+            or "肯定句" in problem
+            or "预算" in problem
+        ):
+            return 0
+    return 1
+
+
 def _section_factors(matrix: list[dict[str, Any]], section_id: str) -> list[str]:
     factors: list[str] = []
     for row in matrix:
@@ -292,7 +307,8 @@ def build_bid_graph(
                 continue
             grouped.setdefault(section_id, []).append(issue)
         targets = []
-        for section_id, section_issues in grouped.items():
+        ordered = sorted(grouped.items(), key=lambda item: _revision_priority(item[1]))
+        for section_id, section_issues in ordered:
             if len(targets) >= max_revisions:
                 break
             targets.append(

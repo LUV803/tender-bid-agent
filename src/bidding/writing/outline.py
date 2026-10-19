@@ -493,10 +493,15 @@ def _default_targets(factor: str, category: str) -> list[str]:
         # Quality factors often contain the substring "管理体系"; map them to
         # the technical quality chapter before the generic certification rule.
         (("质量",), ["quality_management"]),
+        # Explicit certification factors belong to the qualification chapter,
+        # but safety/environment *measures* belong to the technical chapter even
+        # though their names also contain "管理体系".
+        (("管理体系认证", "体系认证", "认证证书"), ["company_qualification"]),
+        (("安全管理", "安全生产", "环境保护", "文明施工", "环保"), ["safety_environment"]),
         (("管理体系", "认证"), ["company_qualification"]),
+        (("安全",), ["safety_environment"]),
         (("施工组织设计", "内容完整性", "编制水平"), ["technical_overview"]),
         (("施工方案", "技术措施"), ["technical_methods"]),
-        (("安全", "环境保护", "文明施工"), ["safety_environment"]),
         (("进度",), ["schedule_resources"]),
         (("资源", "设备", "劳动力", "其它施工"), ["schedule_resources"]),
         (("季节",), ["schedule_resources"]),

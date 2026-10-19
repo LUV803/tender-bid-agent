@@ -32,6 +32,9 @@ from .profile import (
 from .tender import TenderContext
 
 PENDING_RE = re.compile(r"【待(?:填写|核对)(?:[：:][^】]*)?】")
+_EMPTY_PENDING_RE = re.compile(
+    r"【待(填写|核对)[：:]\s*(?:[.．。…]+|待补充|待定)\s*】"
+)
 _TABLE_SEPARATOR_RE = re.compile(r"^:?-{3,}:?$")
 _HEADING_RE = re.compile(r"^(#{1,4})\s+(.*)$")
 _BULLET_RE = re.compile(r"^\s*[-*+]\s+(.*)$")
@@ -65,7 +68,12 @@ def _cell(value: Any) -> str:
     text = str(value or "").strip()
     if not text:
         return ""
-    return text.replace("|", "\\|").replace("\r\n", "<br>").replace("\n", "<br>")
+    return (
+        text.replace("|", "\\|")
+        .replace("\r\n", "；")
+        .replace("\n", "；")
+        .replace("\r", "；")
+    )
 
 
 def _md_table(headers: Iterable[str], rows: Iterable[Iterable[Any]]) -> str:
@@ -288,6 +296,7 @@ def normalize_section_markdown(section: BidSection, draft: str, number: int) -> 
         text = "\n".join(lines).strip()
     if not text:
         text = f"【待核对：章节“{section.title}”未生成，请重试或人工补写】"
+    text = _EMPTY_PENDING_RE.sub(lambda match: f"【待{match.group(1)}】", text)
     lines = _strip_leading_duplicate_heading(text.splitlines(), section.title)
     lines = _demote_headings(lines)
     body = "\n".join(lines).strip()
@@ -418,6 +427,14 @@ def build_review_markdown(
     issues = review.get("issues") or []
     claims = review.get("unverified_claims") or []
     missing = review.get("missing_requirements") or []
+    section_titles = {section.id: section.title for section in outline.sections}
+
+    def section_label(value: Any, fallback: str) -> str:
+        section_id = str(value or "").strip()
+        if not section_id:
+            return fallback
+        return section_titles.get(section_id, section_id)
+
     lines: list[str] = [
         "# 投标文件编制自检报告（内部）",
         "",
@@ -494,7 +511,7 @@ def build_review_markdown(
                     [
                         (
                             index,
-                            item.get("section_id") or "全局",
+                            section_label(item.get("section_id"), "全局"),
                             item.get("problem", ""),
                             item.get("fix", ""),
                             item.get("tender_basis", ""),
@@ -515,7 +532,7 @@ def build_review_markdown(
                 [
                     (
                         index,
-                        item.get("section_id") or "未知",
+                        section_label(item.get("section_id"), "未知"),
                         item.get("claim", ""),
                         item.get("reason", ""),
                     )
@@ -535,7 +552,7 @@ def build_review_markdown(
                     (
                         index,
                         item.get("requirement", ""),
-                        item.get("section_id") or "未指定",
+                        section_label(item.get("section_id"), "未指定"),
                         item.get("suggestion", ""),
                     )
                     for index, item in enumerate(missing, start=1)
@@ -778,7 +795,7 @@ def _add_table(document: Document, rows: list[list[str]]) -> None:
     document.add_paragraph()
 
 
-def _add_cover(document: Document, lines: list[str], project_text: str) -> None:
+def _add_cover(document: Document, lines: list[str]) -> None:
     for _ in range(4):
         document.add_paragraph()
     for line in lines:
@@ -804,10 +821,8 @@ def _add_cover(document: Document, lines: list[str], project_text: str) -> None:
     document.add_paragraph()
     paragraph = document.add_paragraph()
     paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    count = len(collect_pending_markers("\n".join(lines)))
-    if count:
-        run = paragraph.add_run(f"（草稿：含 {count} 类待填写事项，提交前请逐项核实）")
-        _set_run_font(run, east_asia="楷体", size=10, color="C00000")
+    run = paragraph.add_run("（草稿：提交前请逐项核实全部【待填写】和【待核对】事项）")
+    _set_run_font(run, east_asia="楷体", size=10, color="C00000")
 
 
 def export_docx(
@@ -848,7 +863,7 @@ def export_docx(
             continue
         if in_cover:
             if stripped == "<!-- pagebreak -->":
-                _add_cover(document, cover_lines, header_text)
+                _add_cover(document, cover_lines)
                 document.add_page_break()
                 in_cover = False
             else:
@@ -933,7 +948,7 @@ def export_docx(
         _add_body_paragraph(document, " ".join(paragraph_lines))
 
     if in_cover and cover_lines:
-        _add_cover(document, cover_lines, header_text)
+        _add_cover(document, cover_lines)
 
     document.core_properties.title = header_text or path.stem
     document.core_properties.comments = "由 bidding 多 Agent 流程生成的草稿，含待填写占位符。"

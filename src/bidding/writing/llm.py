@@ -176,6 +176,11 @@ class OpenAIBidLLM:
                 self._retry_backoff(attempts)
                 continue
             except Exception as exc:  # noqa: BLE001 - normalized below
+                status = getattr(exc, "status_code", None)
+                if status in {401, 403}:
+                    raise BidWriteError(
+                        f"LLM 认证/权限失败：{exc}", fatal=True
+                    ) from exc
                 last_error = BidWriteError(f"LLM 调用失败：{exc}")
                 if attempts >= max_attempts:
                     break
@@ -233,7 +238,19 @@ class OpenAIBidLLM:
                 self._retry_backoff(attempts)
                 continue
             except Exception as exc:  # noqa: BLE001
+                status = getattr(exc, "status_code", None)
+                if status in {401, 403}:
+                    raise BidWriteError(
+                        f"LLM 认证/权限失败：{exc}", fatal=True
+                    ) from exc
                 last_error = BidWriteError(f"LLM 调用失败：{exc}")
+                if json_mode and (
+                    status in {400, 404, 422} or "json" in str(exc).lower()
+                ):
+                    # Some OpenAI-compatible providers reject response_format;
+                    # retry once without JSON mode before giving up.
+                    mode = "plain"
+                    continue
                 if attempts >= max_attempts:
                     break
                 self._retry_backoff(attempts)

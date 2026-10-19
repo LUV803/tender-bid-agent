@@ -17,7 +17,7 @@ from langgraph.graph import END, START, StateGraph
 from .agents import BidAgents, deterministic_review
 from .outline import BidOutline, build_outline, build_response_matrix
 from .profile import BidderProfile
-from .render import build_bid_markdown, collect_pending_markers
+from .render import PENDING_RE, build_bid_markdown, collect_pending_markers
 from .retrieval import Evidence, TenderRetriever
 from .tender import TenderContext
 
@@ -63,6 +63,17 @@ def _entry(
     }
 
 
+def _section_factors(matrix: list[dict[str, Any]], section_id: str) -> list[str]:
+    factors: list[str] = []
+    for row in matrix:
+        if section_id not in (row.get("section_ids") or []):
+            continue
+        factor = str(row.get("factor") or "").strip()
+        if factor and factor not in factors:
+            factors.append(factor)
+    return factors
+
+
 def _writer_node(
     role: str,
     label: str,
@@ -76,6 +87,7 @@ def _writer_node(
         outline = state["outline"]
         analysis = state.get("analysis") or {}
         evidence = state.get("evidence") or {}
+        matrix = state.get("matrix") or []
         sections = outline.for_role(role)
         drafts = dict(state.get("drafts") or {})
         warnings: list[str] = []
@@ -84,7 +96,10 @@ def _writer_node(
             progress(f"正在编写{label}（{index}/{len(sections)}）：{section.title}")
             try:
                 text = agents.write_section(
-                    section, evidence.get(section.id, []), analysis
+                    section,
+                    evidence.get(section.id, []),
+                    analysis,
+                    factors=_section_factors(matrix, section.id),
                 )
             except Exception as exc:  # noqa: BLE001 - BidWriteError is imported lazily
                 fatal = bool(getattr(exc, "fatal", False))
@@ -237,8 +252,12 @@ def build_bid_graph(
 
         issues = [item for item in review.get("issues") or [] if isinstance(item, dict)]
         claims = [
-            item for item in review.get("unverified_claims") or [] if isinstance(item, dict)
+            item
+            for item in review.get("unverified_claims") or []
+            if isinstance(item, dict)
+            and not PENDING_RE.search(str(item.get("claim") or ""))
         ]
+        review["unverified_claims"] = claims
         outline_by_id = outline.by_id()
         known_problems = {
             str(item.get("problem") or "").strip()
@@ -317,6 +336,7 @@ def build_bid_graph(
         outline = state["outline"]
         outline_by_id = outline.by_id()
         evidence = state.get("evidence") or {}
+        matrix = state.get("matrix") or []
         targets = state.get("revision_targets") or []
         drafts = dict(state.get("drafts") or {})
         revisions: list[dict[str, Any]] = []
@@ -334,6 +354,7 @@ def build_bid_graph(
                     before,
                     target.get("issues") or [],
                     evidence.get(section_id, []),
+                    factors=_section_factors(matrix, section_id),
                 )
             except Exception as exc:  # noqa: BLE001
                 if getattr(exc, "fatal", False):
@@ -461,5 +482,8 @@ def run_writing_graph(
         max_revisions=max_revisions,
         progress=progress,
     )
-    result = graph.invoke({}, config={"recursion_limit": 40})
+    result = graph.invoke(
+        {"warnings": [], "trace": [], "revisions": []},
+        config={"recursion_limit": 40},
+    )
     return result  # type: ignore[return-value]

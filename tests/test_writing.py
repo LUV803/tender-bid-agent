@@ -4,14 +4,17 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 from docx import Document
 
 from bidding.cli import main
+from bidding.writing.agents import deterministic_review
 from bidding.writing.errors import BidWriteError
 from bidding.writing.graph import run_writing_graph
+from bidding.writing.llm import OpenAIBidLLM
 from bidding.writing.outline import (
     build_outline,
     build_response_matrix,
@@ -72,6 +75,7 @@ def _fixture(tmp_path: Path):
                 "<!-- page: 3 -->\n第三章 评标办法\n"
                 "本项目采用综合评估法。施工方案与技术措施，满分 40 分。"
                 "质量管理体系与措施，满分 10 分。投标报价，满分 30 分。"
+                "安全管理体系与措施，满分 5 分。环境保护管理体系与措施，满分 5 分。"
                 "施工方案应包含施工总部署、关键工序和质量安全措施。"
             ),
         },
@@ -127,6 +131,20 @@ def _fixture(tmp_path: Path):
                 "max_score": 10,
                 "criteria": "质量管理体系健全，措施具体。",
                 "source_quote": "质量管理体系与措施，满分 10 分",
+            },
+            {
+                "factor": "安全管理体系与措施",
+                "category": "技术",
+                "max_score": 5,
+                "criteria": "安全管理体系完整，措施得力。",
+                "source_quote": "安全管理体系与措施，满分 5 分",
+            },
+            {
+                "factor": "环境保护管理体系与措施",
+                "category": "技术",
+                "max_score": 5,
+                "criteria": "环境保护管理体系完整，措施得力。",
+                "source_quote": "环境保护管理体系与措施，满分 5 分",
             },
             {
                 "factor": "投标报价",
@@ -265,6 +283,7 @@ class FakeBidLLM:
     def __init__(self) -> None:
         self.calls = 0
         self.purposes: list[str] = []
+        self.user_prompts: list[str] = []
 
     @staticmethod
     def _title(user: str) -> str:
@@ -305,6 +324,7 @@ class FakeBidLLM:
     def complete_text(self, system: str, user: str, *, purpose: str = "") -> str:
         self.calls += 1
         self.purposes.append(purpose)
+        self.user_prompts.append(user)
         title = self._title(user)
         if purpose.startswith("reviser:"):
             return (
@@ -361,6 +381,23 @@ def test_prompt_trimming_does_not_mutate_profile_facts() -> None:
     assert len(text) <= 5000
     assert profile.company["name"] == long_name
     assert profile.company_name == long_name
+
+
+def test_bid_llm_fails_fast_on_auth_error() -> None:
+    class StatusError(Exception):
+        status_code = 401
+
+    llm = object.__new__(OpenAIBidLLM)
+    llm.settings = SimpleNamespace(llm_max_retries=3, mineru_retry_backoff=1.0)
+    llm.provider = "zhipu"
+    llm.records = []
+    llm._create = lambda *args, **kwargs: (_ for _ in ()).throw(
+        StatusError("invalid api key")
+    )
+    with pytest.raises(BidWriteError) as excinfo:
+        llm.complete_text("系统", "用户", purpose="writer:test")
+    assert excinfo.value.fatal
+    assert llm.calls == 0
 
 
 def test_tender_context_and_retrieval_keep_page_citations(tmp_path: Path) -> None:
@@ -426,6 +463,8 @@ def test_outline_is_deterministic_and_accepts_bounded_analyst_input(tmp_path: Pa
     by_factor = {row["factor"]: row for row in matrix}
     assert by_factor["施工方案与技术措施"]["section_ids"] == ["technical_methods"]
     assert by_factor["质量管理体系与措施"]["section_ids"] == ["quality_management"]
+    assert by_factor["安全管理体系与措施"]["section_ids"] == ["safety_environment"]
+    assert by_factor["环境保护管理体系与措施"]["section_ids"] == ["safety_environment"]
     assert by_factor["投标报价"]["section_ids"] == ["price_commitments"]
 
 
@@ -474,6 +513,96 @@ def test_graph_runs_all_agents_and_revises_budget_misuse(tmp_path: Path) -> None
         "assembler",
     ]
     assert any("正在编写" in message for message in progress)
+    technical_prompt = next(
+        item for item in llm.user_prompts if "- 章节：施工方案与技术措施" in item
+    )
+    assert (
+        "【本章节必须明确响应的评分因素】\n- 施工方案与技术措施"
+        in technical_prompt
+    )
+    safety_prompt = next(
+        item for item in llm.user_prompts if "- 章节：安全管理、环境保护与文明施工" in item
+    )
+    assert "安全管理体系与措施" in safety_prompt
+    assert "环境保护管理体系与措施" in safety_prompt
+
+
+def test_graph_skips_reviser_when_disabled(tmp_path: Path) -> None:
+    settings, profile_path = _fixture(tmp_path)
+    profile = load_profile(profile_path)
+    tender = load_tender_context(DOC_ID, settings)
+    retriever = TenderRetriever(tender)
+    llm = FakeBidLLM()
+    from bidding.writing.agents import BidAgents
+
+    state = run_writing_graph(
+        agents=BidAgents(llm, profile, tender, retriever),
+        retriever=retriever,
+        tender=tender,
+        profile=profile,
+        max_revisions=0,
+    )
+    assert state["revisions"] == []
+    assert "reviser" not in [entry["node"] for entry in state["trace"]]
+    assert "333.37 万元" in state["drafts"]["price_commitments"]
+
+
+def test_deterministic_review_flags_system_fill_and_bad_reference(
+    tmp_path: Path,
+) -> None:
+    settings, profile_path = _fixture(tmp_path)
+    profile = load_profile(profile_path)
+    tender = load_tender_context(DOC_ID, settings)
+    outline = build_outline({}, tender)
+    drafts = {section.id: "本章内容。" for section in outline.sections}
+    drafts["bid_letter"] += (
+        "以上【待填写】内容将由系统根据投标人资料自动填充。"
+        "详见投标文件“十、原件的扫描件”章节。"
+    )
+    issues = deterministic_review(tender, outline, drafts, profile, [])
+    assert any("系统自动填充" in item["problem"] for item in issues)
+    assert any("不存在的章节" in item["problem"] for item in issues)
+
+
+def test_graph_ignores_placeholder_only_unverified_claims(tmp_path: Path) -> None:
+    class ClaimReviewLLM(FakeBidLLM):
+        def complete_json(
+            self, system: str, user: str, *, purpose: str = ""
+        ) -> dict[str, Any]:
+            data = super().complete_json(system, user, purpose=purpose)
+            if purpose == "reviewer":
+                data["unverified_claims"] = [
+                    {
+                        "section_id": "company_qualification",
+                        "claim": "投标人已获得【待填写：体系名称】认证。",
+                        "reason": "投标人资料未提供认证信息",
+                    },
+                    {
+                        "section_id": "company_qualification",
+                        "claim": "投标人近三年均盈利。",
+                        "reason": "投标人资料未提供财务数据",
+                    },
+                ]
+            return data
+
+    settings, profile_path = _fixture(tmp_path)
+    profile = load_profile(profile_path)
+    tender = load_tender_context(DOC_ID, settings)
+    retriever = TenderRetriever(tender)
+    from bidding.writing.agents import BidAgents
+
+    state = run_writing_graph(
+        agents=BidAgents(ClaimReviewLLM(), profile, tender, retriever),
+        retriever=retriever,
+        tender=tender,
+        profile=profile,
+        max_revisions=0,
+    )
+    claims = state["review"]["unverified_claims"]
+    assert [item["claim"] for item in claims] == ["投标人近三年均盈利。"]
+    problems = [item["problem"] for item in state["review"]["issues"]]
+    assert any("近三年均盈利" in problem for problem in problems)
+    assert not any("体系名称" in problem for problem in problems)
 
 
 def test_write_bid_writes_markdown_docx_review_and_manifest(tmp_path: Path) -> None:
@@ -540,7 +669,20 @@ def test_review_markdown_lists_pending_markers_and_warnings(tmp_path: Path) -> N
         profile=profile,
         outline=outline,
         matrix=[],
-        review={"summary": "测试", "issues": [], "unverified_claims": [], "missing_requirements": []},
+        review={
+            "summary": "测试",
+            "issues": [
+                {
+                    "severity": "medium",
+                    "section_id": "company_qualification",
+                    "problem": "测试问题",
+                    "fix": "测试修改",
+                    "tender_basis": "",
+                }
+            ],
+            "unverified_claims": [],
+            "missing_requirements": [],
+        },
         revisions=[],
         warnings=["测试警告"],
         llm_info={"provider": "fake", "model": "fake", "calls": 1},
@@ -549,16 +691,23 @@ def test_review_markdown_lists_pending_markers_and_warnings(tmp_path: Path) -> N
     assert "【待填写：投标日期】" in review
     assert "测试警告" in review
     assert "未执行自动修订" in review
+    assert "投标人基本情况、资质与信用" in review
+    assert "company_qualification" not in review
 
 
 def test_markdown_helpers_normalize_headings_and_numbering() -> None:
     section = canonical_sections()[0]
     text = normalize_section_markdown(
-        section, f"## {section.title}\n\n### 小节\n正文", 11
+        section,
+        f"## {section.title}\n\n### 小节\n正文【待填写：...】【待核对：…】",
+        11,
     )
     assert text.startswith("## 十一、投标函及投标函附录")
     assert text.count(section.title) == 1
     assert "#### 小节" in text
+    assert "【待填写：...】" not in text
+    assert "【待填写】" in text
+    assert "【待核对】" in text
     assert cn_index(1) == "一"
     assert cn_index(10) == "十"
     assert cn_index(11) == "十一"

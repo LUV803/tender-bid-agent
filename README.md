@@ -451,7 +451,8 @@ CLI 错误处理，以及 API 上传/写标校验、202 轮询、可选抽取/�
 Redis 任务状态与 TTL/文档锁、Celery 任务路由与生命周期、双后端切换和
 `POST /api/bids` 端到端流程；文档库与产物接口覆盖清单扫描、路径白名单与文件
 预览；招标检索覆盖多页表定位、目录页过滤、结构化去重、混合/关键词模式与
-`/api/search` 参数校验；公司资料库覆盖 PostgreSQL 存取、`company_id` 载入覆盖
+`/api/search` 参数校验；检索评测覆盖金标校验、指标计算、阈值失败与 demo 回归；
+公司资料库覆盖 PostgreSQL 存取、`company_id` 载入覆盖
 与不可用时的 503；标书编写部分覆盖 profile 占位符、招标上下文与页码引用、
 固定大纲/评分矩阵、LangGraph 全流程、事实优先修订、Markdown/Word 产物和 CLI。
 MinIO 镜像、恢复与 API 远端回退使用内存 Fake 客户端覆盖。全部为离线测试，

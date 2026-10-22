@@ -32,6 +32,14 @@ Tender document intelligence and grounded bid generation.
 | --- |
 | ![历史产物](docs/screenshots/07-history.png) |
 
+## 安全边界
+
+本项目按**单机工作台**设计：默认仅监听 `127.0.0.1:8001`，目前**没有账号体系、登录态、角色权限或用户数据隔离**。任何能访问 API 或 `upload/` 目录的人，都可以上传解析文档、检索、修改公司资料、发起写标并下载产物。
+
+不要把 API、Redis、ChromaDB、PostgreSQL、MinIO 直接暴露到公网。多人或多机访问必须在外部实现访问控制（VPN、带 SSO/OIDC 的反向代理、IP 白名单、TLS 等），并为不同用户隔离文件系统与数据库。账号体系与权限隔离仍是待办项。
+
+完整边界与部署建议见 [SECURITY.md](SECURITY.md)。
+
 ## 快速开始
 
 ```bash

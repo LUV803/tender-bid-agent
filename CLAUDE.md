@@ -172,4 +172,5 @@ D:\minio\bin\start.bat
 - 标书编写的投标人资料来自 CLI 的 `upload/bidder_profile.json`（模板 `bidder_profile.example.json`）、`POST /api/bids` 请求体中的 `profile`，或通过 `company_id` 从 PostgreSQL 公司资料库载入后再用 `profile` 覆盖。公司资料库使用 `DATABASE_URL`（`postgresql+asyncpg://...`），首次访问自动建表，数据库不可用时接口返回 503 但不影响其他工作流。`upload/` 整体被 git 忽略；不要编造投标人事实，缺失字段必须保留【待填写】占位符；临时 profile 文件结束后由 worker 删除。
 - MinIO 采用“本地缓存 + 远端镜像”：`upload/` 仍是所有流水线的读写目录；解析、抽取、入库、写标完成后尽力上传对应产物（失败仅记录警告，不中断任务），本地缺失时从 bucket 恢复。对象前缀为 `documents/<doc_id>/{source,parsed,images,bids}/`。`GET /api/documents`、`GET /api/bids` 合并本地与远端记录，`POST /api/bids` 与产物下载会按需恢复；`GET /api/health.storage` 为 `minio` 或 `local`。测试通过 `tests/conftest.py` 强制关闭 MinIO，并使用内存 Fake 客户端。
 - `write` 有 CLI 与 HTTP/Celery 两个入口，共用同一流水线；运行前需完成解析与抽取，且 LLM key 可用。
+- 本项目当前按单机工作台设计，没有账号体系、角色权限或用户数据隔离，API 默认只监听 `127.0.0.1`。不要把 API/Redis/Chroma/PostgreSQL/MinIO 直接暴露公网；多人或多机访问必须依赖外部访问控制。安全边界与待办项见 `SECURITY.md`。
 - 修改功能后运行相关检查（`uv run pytest`、`npm --prefix frontend run build`），并按「固定任务」创建提交。

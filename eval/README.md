@@ -81,6 +81,8 @@ uv run python -m bidding evaluate \
 - `Top-1`：第一条结果是否命中；
 - `P95`：单次查询耗时（仅作观察，不作为 CI 阈值）。
 
+所有排序指标共用 `k` 作为截断位置；`Hit@3` 在 `k < 3` 时按 `k` 截断。
+
 CI 会运行演示集，并用 `--min-hit-at-3`、`--min-recall-at-k`、`--min-mrr` 等参数
 设置最低阈值；指标低于阈值时命令以非零状态退出。
 

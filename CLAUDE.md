@@ -18,13 +18,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ```text
 src/bidding/                  Python 包（src 布局）
-src/bidding/cli.py            命令行入口：doctor / parse / extract / ingest / inspect / write
+src/bidding/cli.py            命令行入口：doctor / parse / extract / ingest / inspect / evaluate / write
 src/bidding/config.py         .env 配置与路径约定
 src/bidding/models.py         解析、抽取、索引共用数据结构
 src/bidding/parsing/          PDF 解析：结构还原、PyMuPDF、MinerU、产物落盘
 src/bidding/extraction/       结构化抽取：章节单元、LLM 容错、归一化/合并/grounding
 src/bidding/indexing/         检索索引：分块、智谱 embedding、Chroma 读写与自检
 src/bidding/search.py         面向问题的混合检索：词法打分、结构化条目、表页定位与向量融合
+src/bidding/evaluation.py     离线检索评测：金标加载、Hit@k/Recall@k/MRR 与阈值检查
 src/bidding/companies.py      PostgreSQL 公司资料库：懒建表、JSON profile 与覆盖合并
 src/bidding/writing/          多 Agent 标书编写：profile、招标上下文、检索、大纲、LangGraph、渲染与流水线
 src/bidding/storage.py        MinIO 对象存储：产物镜像、按需恢复、远端清单与连通性检查
@@ -41,6 +42,8 @@ api/celery_runner.py          默认的 Celery 投递器（按 kind 路由 parse
 api/jobs.py                   内存任务表与线程池（TASK_BACKEND=memory 与测试）
 api/__main__.py               `python -m api` 启动入口
 tests/                        离线 pytest 测试
+eval/                         检索评测集：demo 文档、查询金标与格式说明
+.github/workflows/ci.yml      GitHub Actions：pytest、检索评测、前端 build/lint
 frontend/src/                 React 前端源码
 frontend/src/api.ts           类型化 API 客户端、API_BASE 与 artifact 文本读取
 frontend/src/hooks.ts         任务轮询、健康检查与列表数据加载 hooks
@@ -72,6 +75,7 @@ uv run python -m bidding.parsing <pdf>                  # 等价的快捷入口
 uv run python -m bidding extract <doc_id>               # 结构化抽取
 uv run python -m bidding ingest <doc_id|pdf>            # 分块、嵌入并写入 Chroma
 uv run python -m bidding inspect <doc_id> --query "评标办法"  # 检索测试
+uv run python -m bidding evaluate eval/demo_queries.json --parsed-dir eval/demo_parsed  # 离线检索评测
 uv run python -m bidding write <doc_id>                 # 多 Agent 生成投标文件
 uv run python -m src.cli write <doc_id>                 # 等价兼容入口
 uv run python -m bidding storage status                 # MinIO 配置与连通性
@@ -172,5 +176,7 @@ D:\minio\bin\start.bat
 - 标书编写的投标人资料来自 CLI 的 `upload/bidder_profile.json`（模板 `bidder_profile.example.json`）、`POST /api/bids` 请求体中的 `profile`，或通过 `company_id` 从 PostgreSQL 公司资料库载入后再用 `profile` 覆盖。公司资料库使用 `DATABASE_URL`（`postgresql+asyncpg://...`），首次访问自动建表，数据库不可用时接口返回 503 但不影响其他工作流。`upload/` 整体被 git 忽略；不要编造投标人事实，缺失字段必须保留【待填写】占位符；临时 profile 文件结束后由 worker 删除。
 - MinIO 采用“本地缓存 + 远端镜像”：`upload/` 仍是所有流水线的读写目录；解析、抽取、入库、写标完成后尽力上传对应产物（失败仅记录警告，不中断任务），本地缺失时从 bucket 恢复。对象前缀为 `documents/<doc_id>/{source,parsed,images,bids}/`。`GET /api/documents`、`GET /api/bids` 合并本地与远端记录，`POST /api/bids` 与产物下载会按需恢复；`GET /api/health.storage` 为 `minio` 或 `local`。测试通过 `tests/conftest.py` 强制关闭 MinIO，并使用内存 Fake 客户端。
 - `write` 有 CLI 与 HTTP/Celery 两个入口，共用同一流水线；运行前需完成解析与抽取，且 LLM key 可用。
+- `bidding evaluate` 读取金标 JSON，默认 `lexical` 模式且不访问外部服务；金标 `relevant` 项按 kind/page/table_label/title_contains 组合匹配。演示集在 `eval/demo_queries.json` + `eval/demo_parsed/`，格式见 `eval/README.md`；真实项目金标放 `eval/private/` 或 `*.local.json`（均被 git 忽略），不得提交招标原文或未脱敏数据。
+- GitHub Actions（`.github/workflows/ci.yml`）运行 `uv sync --frozen --dev`、`pytest`、演示检索评测与前端 `build`/`lint`；修改检索排序后必须保持评测阈值通过。
 - 本项目当前按单机工作台设计，没有账号体系、角色权限或用户数据隔离，API 默认只监听 `127.0.0.1`。不要把 API/Redis/Chroma/PostgreSQL/MinIO 直接暴露公网；多人或多机访问必须依赖外部访问控制。安全边界与待办项见 `SECURITY.md`。
 - 修改功能后运行相关检查（`uv run pytest`、`npm --prefix frontend run build`），并按「固定任务」创建提交。

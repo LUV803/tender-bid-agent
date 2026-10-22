@@ -1,11 +1,13 @@
 # Tender Bid Agent
 
+[![CI](https://github.com/LUV803/tender-bid-agent/actions/workflows/ci.yml/badge.svg)](https://github.com/LUV803/tender-bid-agent/actions/workflows/ci.yml)
+
 Tender document intelligence and grounded bid generation.
 
 招标文件解析、结构化抽取、检索索引与多 Agent 标书编写。当前已打通单文档的
 **解析 → 结构化抽取 → 分块嵌入 → Chroma 检索自检 → 招标检索 → 多 Agent 标书编写**
 流水线，入口为 CLI、FastAPI HTTP API 与 React/Electron 工作台。公司资料可保存
-到 PostgreSQL，并在写标时一键载入。
+到 PostgreSQL，并在写标时一键载入。检索层附带可复现的人工标注评测与 CI 回归门槛。
 
 ## 技术栈
 
@@ -13,6 +15,7 @@ Tender document intelligence and grounded bid generation.
   OpenAI SDK（DeepSeek / 智谱）、zai-sdk（embedding-3）、ChromaDB、LangGraph、
   python-docx、MinIO 对象存储（可选）、SQLAlchemy 2.0 + asyncpg（公司资料库）。
 - 前端：React 19、TypeScript、Vite 8、Tailwind CSS 4、Electron 44。
+- 评测与 CI：人工标注检索金标、Hit@k / Recall@k / MRR、pytest、GitHub Actions。
 
 ## 界面预览
 
@@ -85,6 +88,9 @@ uv run python -m bidding ingest <doc_id> --no-verify
 
 # 4) 查看集合统计并做检索测试
 uv run python -m bidding inspect <doc_id> --query "评标办法 评分标准 资格审查"
+
+# 5) 用人工标注问题集评测检索（默认 lexical，可离线运行）
+uv run python -m bidding evaluate eval/demo_queries.json --parsed-dir eval/demo_parsed
 ```
 
 `ingest` 也可以直接接收 PDF 路径；`--force` 会强制重解析和重抽取。
@@ -405,6 +411,35 @@ ZHIPU_CHAT_MODEL=glm-4-plus
 - 若 DeepSeek key 不可用，可将 `LLM_PROVIDER` 切换为 `zhipu`，无需改代码。
 - 向量嵌入始终使用智谱 `embedding-3`，与聊天 provider 无关。
 
+## 检索评测
+
+`bidding.evaluation` 用人工标注的问题集计算 `Hit@k`、`Recall@k`、`MRR` 和
+`Top-1`，默认 `lexical` 模式，不访问嵌入或 LLM 服务。仓库自带一个 5 页演示集，
+可直接运行：
+
+```bash
+uv run python -m bidding evaluate \
+  eval/demo_queries.json \
+  --parsed-dir eval/demo_parsed \
+  --mode lexical \
+  --k 5
+
+# 真实文档：默认从 upload/parsed/<doc_id> 读取
+uv run python -m bidding evaluate eval/private/my_tender.json --mode lexical
+
+# CI 阈值：任一指标低于下限时以非零状态退出
+uv run python -m bidding evaluate \
+  eval/demo_queries.json \
+  --parsed-dir eval/demo_parsed \
+  --min-hit-at-3 0.8 \
+  --min-recall-at-k 0.7 \
+  --min-mrr 0.7
+```
+
+评测集格式、指标定义和真实项目标注建议见 [eval/README.md](eval/README.md)。
+真实招标资料请放在 `eval/private/` 或使用 `*.local.json` 后缀，这两类文件已被
+Git 忽略。演示集分数只用于回归，不代表生产检索质量。
+
 ## 测试
 
 ```bash
@@ -421,6 +456,9 @@ Redis 任务状态与 TTL/文档锁、Celery 任务路由与生命周期、双�
 固定大纲/评分矩阵、LangGraph 全流程、事实优先修订、Markdown/Word 产物和 CLI。
 MinIO 镜像、恢复与 API 远端回退使用内存 Fake 客户端覆盖。全部为离线测试，
 不访问外部 API、真实 Redis、真实 PostgreSQL 或真实 MinIO。
+
+GitHub Actions 会运行 `pytest`、演示检索评测以及前端的 `build` 和 `lint`，
+配置见 [.github/workflows/ci.yml](.github/workflows/ci.yml)。
 
 ## 前端工作台
 

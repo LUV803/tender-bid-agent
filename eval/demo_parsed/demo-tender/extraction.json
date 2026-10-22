@@ -1,0 +1,43 @@
+{
+  "project_name": "示例供水工程",
+  "evaluation_factors": [
+    {
+      "factor": "投标报价",
+      "max_score": 50,
+      "category": "商务",
+      "criteria": "投标报价等于评标基准价时得50分，每高1%扣1分。",
+      "source_quote": "投标报价得分计算：投标报价等于评标基准价时得50分，每高1%扣1分。"
+    },
+    {
+      "factor": "施工组织设计",
+      "max_score": 30,
+      "category": "技术",
+      "criteria": "施工方案、进度计划、质量保证措施和安全生产措施完整。",
+      "source_quote": "施工组织设计应包括施工方案、施工进度计划、质量保证措施和安全生产措施"
+    }
+  ],
+  "qualifications": [
+    {
+      "category": "资格",
+      "requirement": "具有市政公用工程施工总承包三级及以上资质",
+      "thresholds": ["市政公用工程施工总承包三级"],
+      "source_quote": "资格审查需要提供营业执照、资质证书和安全生产许可证等材料。"
+    }
+  ],
+  "preliminary_review": [
+    {
+      "stage": "资格评审",
+      "item": "营业执照",
+      "criteria": "提供有效的营业执照副本",
+      "source_quote": "资格审查需要提供营业执照、资质证书和安全生产许可证等材料。"
+    }
+  ],
+  "bid_format": {
+    "items": [
+      {
+        "title": "资格审查资料",
+        "requirements": "包括投标人基本情况表、近年财务状况表、类似项目情况表、信誉情况表。"
+      }
+    ]
+  }
+}

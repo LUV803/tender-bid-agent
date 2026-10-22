@@ -1,7 +1,7 @@
 [project]
 name = "bidding"
 version = "0.1.0"
-description = "Add your description here"
+description = "Tender document parsing, grounded retrieval and multi-agent bid generation."
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [

@@ -1,0 +1,82 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    name: Backend tests + retrieval evaluation
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Install dependencies
+        run: uv sync --frozen --dev
+
+      - name: Run offline tests
+        run: uv run pytest -q
+
+      - name: Evaluate demo retrieval set
+        run: >
+          uv run python -m bidding evaluate eval/demo_queries.json
+          --parsed-dir eval/demo_parsed
+          --mode lexical
+          --k 5
+          --limit 10
+          --min-hit-at-3 0.8
+          --min-recall-at-k 0.7
+          --min-mrr 0.7
+          --json-out eval/_ci_report.json
+
+      - name: Upload retrieval report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: retrieval-evaluation
+          path: eval/_ci_report.json
+          if-no-files-found: ignore
+
+  frontend:
+    name: Frontend build + lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+        env:
+          # The build does not need the Electron runtime binary.
+          ELECTRON_SKIP_BINARY_DOWNLOAD: "1"
+
+      - name: Build
+        run: npm run build
+
+      - name: Lint
+        run: npm run lint

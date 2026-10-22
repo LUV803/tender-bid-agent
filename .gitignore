@@ -27,3 +27,8 @@ redis_data/
 # Runtime uploads, parsed artifacts and generated bids
 upload/
 
+# Local retrieval gold sets and generated reports (may contain tender data)
+eval/private/
+eval/*.local.json
+eval/_*.json
+

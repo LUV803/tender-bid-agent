@@ -1,0 +1,64 @@
+{
+  "doc_id": "demo-tender",
+  "description": "5 页演示招标文件；用于 CI 和评测脚本自检，不包含真实项目数据。",
+  "queries": [
+    {
+      "id": "price-score-table",
+      "query": "投标报价得分怎么算",
+      "relevant": [
+        {"kind": "table", "table_label": "表10", "page": 2}
+      ]
+    },
+    {
+      "id": "total-price-table",
+      "query": "投标总价怎么评分",
+      "relevant": [
+        {"kind": "table", "table_label": "表11", "page": 3}
+      ]
+    },
+    {
+      "id": "table10-by-label",
+      "query": "表10 投标报价",
+      "relevant": [
+        {"table_label": "表10", "page": 2}
+      ]
+    },
+    {
+      "id": "construction-section",
+      "query": "施工组织设计怎么写",
+      "relevant": [
+        {"kind": "section", "page": 4, "title_contains": "施工组织设计"},
+        {"kind": "factor", "title_contains": "施工组织设计"}
+      ]
+    },
+    {
+      "id": "quality-measures",
+      "query": "质量保证措施",
+      "relevant": [
+        {"kind": "section", "page": 4, "title_contains": "施工组织设计"}
+      ]
+    },
+    {
+      "id": "qualification-section",
+      "query": "资格审查需要什么材料",
+      "relevant": [
+        {"kind": "section", "page": 5, "title_contains": "资格审查"},
+        {"kind": "qualification", "page": 5}
+      ]
+    },
+    {
+      "id": "license-review",
+      "query": "营业执照需要提供什么",
+      "relevant": [
+        {"kind": "review", "page": 5, "title_contains": "营业执照"}
+      ]
+    },
+    {
+      "id": "table11-score",
+      "query": "表11 得分",
+      "relevant": [
+        {"table_label": "表11", "page": 3}
+      ]
+    }
+  ]
+}

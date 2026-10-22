@@ -1,14 +1,23 @@
-"""Command line interface for parsing, extraction and indexing."""
+"""Command line interface for parsing, extraction, indexing, evaluation and writing."""
 
 from __future__ import annotations
 
 import argparse
+import json
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 from . import storage
 from .config import Settings, get_settings
 from .console import configure_stdio
+from .evaluation import (
+    Thresholds,
+    check_thresholds,
+    evaluate,
+    format_report,
+    load_gold,
+)
 from .extraction import ExtractError, run_extract
 from .indexing import (
     IngestError,
@@ -18,6 +27,7 @@ from .indexing import (
 )
 from .parsing import ParseError, parse_document
 from .parsing.structure import sanitize_doc_id
+from .search import SearchError
 from .writing import BidWriteError, write_bid
 
 
@@ -328,6 +338,65 @@ def _cmd_storage(args: argparse.Namespace) -> int:
     return 0
 
 
+def _ratio(value: str) -> float:
+    try:
+        number = float(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("必须是 0 到 1 之间的小数") from exc
+    if not 0.0 <= number <= 1.0:
+        raise argparse.ArgumentTypeError("必须是 0 到 1 之间的小数")
+    return number
+
+
+def _cmd_evaluate(args: argparse.Namespace) -> int:
+    settings = get_settings()
+    if args.parsed_dir:
+        parsed_dir = Path(args.parsed_dir).expanduser().resolve()
+        settings = replace(settings, parsed_dir=parsed_dir)
+    gold = load_gold(args.gold)
+    result = evaluate(
+        settings,
+        gold,
+        doc_id=args.doc_id,
+        limit=args.limit,
+        mode=args.mode,
+        k=args.k,
+    )
+    print(format_report(result))
+    if args.json_out:
+        output = Path(args.json_out).expanduser()
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(
+            json.dumps(result, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        print(f"\nJSON report: {output}")
+
+    thresholds = Thresholds(
+        hit_at_1=args.min_hit_at_1,
+        hit_at_3=args.min_hit_at_3,
+        recall_at_k=args.min_recall_at_k,
+        mrr=args.min_mrr,
+    )
+    failures = check_thresholds(result, thresholds)
+    if failures:
+        print()
+        for failure in failures:
+            print(f"FAIL: {failure}")
+        return 1
+    if any(
+        value is not None
+        for value in (
+            args.min_hit_at_1,
+            args.min_hit_at_3,
+            args.min_recall_at_k,
+            args.min_mrr,
+        )
+    ):
+        print("\nPASS: all metric thresholds met")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="bidding",
@@ -403,6 +472,50 @@ def build_parser() -> argparse.ArgumentParser:
     inspect_parser.add_argument("--top-k", type=int, default=5, help="返回条数")
     inspect_parser.set_defaults(func=_cmd_inspect)
 
+    evaluate_parser = subparsers.add_parser(
+        "evaluate", help="用标注问题集评测招标检索（Hit@k / Recall@k / MRR）"
+    )
+    evaluate_parser.add_argument("gold", help="评测集 JSON 文件")
+    evaluate_parser.add_argument(
+        "--doc-id", default=None, help="覆盖评测集中的 doc_id"
+    )
+    evaluate_parser.add_argument(
+        "--parsed-dir",
+        default=None,
+        help="解析产物根目录；默认 upload/parsed（demo 可用 eval/demo_parsed）",
+    )
+    evaluate_parser.add_argument(
+        "--mode",
+        choices=("auto", "lexical", "hybrid"),
+        default="lexical",
+        help="默认 lexical，不调用嵌入服务；auto/hybrid 需要已入库文档",
+    )
+    evaluate_parser.add_argument(
+        "--limit", type=int, default=10, help="每条查询返回的结果数（默认 10）"
+    )
+    evaluate_parser.add_argument(
+        "--k", type=int, default=5, help="Hit@k / Recall@k 的截断位置（默认 5）"
+    )
+    evaluate_parser.add_argument(
+        "--json-out", default=None, help="可选：将完整逐条结果写入 JSON 文件"
+    )
+    evaluate_parser.add_argument(
+        "--min-hit-at-1", type=_ratio, default=None, help="Hit@1 最低值（0-1）"
+    )
+    evaluate_parser.add_argument(
+        "--min-hit-at-3", type=_ratio, default=None, help="Hit@3 最低值（0-1）"
+    )
+    evaluate_parser.add_argument(
+        "--min-recall-at-k",
+        type=_ratio,
+        default=None,
+        help="Recall@k 最低值（0-1）",
+    )
+    evaluate_parser.add_argument(
+        "--min-mrr", type=_ratio, default=None, help="MRR 最低值（0-1）"
+    )
+    evaluate_parser.set_defaults(func=_cmd_evaluate)
+
     write_parser = subparsers.add_parser(
         "write", help="按招标文件多 Agent 生成投标文件（Markdown + Word）"
     )
@@ -461,7 +574,15 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         return int(args.func(args))
-    except (ParseError, ExtractError, IngestError, BidWriteError, ValueError, OSError) as exc:
+    except (
+        ParseError,
+        ExtractError,
+        IngestError,
+        BidWriteError,
+        SearchError,
+        ValueError,
+        OSError,
+    ) as exc:
         print(f"错误：{exc}", file=sys.stderr)
         return 1
 
